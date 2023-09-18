@@ -2,7 +2,10 @@ use std::time::SystemTime;
 
 use sha2::{Digest, Sha256};
 
-use crate::{identity::Identity, packet::Packet};
+use crate::{
+    identity::{Identity, IdentityCommon},
+    packet::Packet,
+};
 
 #[derive(Debug, PartialEq, thiserror::Error)]
 pub enum DestinationError {
@@ -22,14 +25,14 @@ pub enum PacketError {
     AnnounceDestinationNotSingle,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Destination {
     app_name: String,
     aspects: Vec<String>,
     inner: DestinationInner,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum DestinationInner {
     Single(SingleDestination),
     Group(GroupDestination),
@@ -73,6 +76,13 @@ impl Destination {
 
     pub fn aspects(&self) -> &[String] {
         &self.aspects
+    }
+
+    pub fn get_identity(&self) -> Option<&Identity> {
+        match &self.inner {
+            DestinationInner::Single(single) => Some(&single.identity),
+            _ => None,
+        }
     }
 
     /// Returns the full name of the destination according to the Reticulum spec.
@@ -157,19 +167,21 @@ impl DestinationBuilder {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SingleDestination {
     identity: Identity,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct GroupDestination {}
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct PlainDestination {}
 
 #[cfg(test)]
 mod tests {
+    use crate::identity::IdentityCommon;
+
     use super::*;
 
     #[test]

@@ -4,6 +4,7 @@ use base64::Engine;
 use ed25519_dalek::{DigestSigner, Signer, Verifier};
 use hkdf::Hkdf;
 use rand::rngs::OsRng;
+use serde::{de, ser::SerializeStruct, Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256, Sha512};
 use x25519_dalek::PublicKey;
 
@@ -21,6 +22,13 @@ pub trait IdentityCommon {
     fn encrypt_for(&self, message: &[u8]) -> Result<Vec<u8>, CryptoError>;
     fn verify_from(&self, message: Box<dyn SignedMessage>) -> Result<(), CryptoError>;
     fn truncated_hash(&self) -> [u8; 16];
+    fn hex_hash(&self) -> String {
+        let hash = self.truncated_hash();
+        hex::encode(hash)
+    }
+    fn handle(&self) -> IdentityHandle {
+        IdentityHandle(self.truncated_hash())
+    }
 }
 
 pub trait LocalIdentity {
@@ -28,10 +36,40 @@ pub trait LocalIdentity {
     fn sign(&self, message: &[u8]) -> Result<Vec<u8>, CryptoError>;
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct PeerIdentityInner {
     identity_key: x25519_dalek::PublicKey,
     sign_key: ed25519_dalek::VerifyingKey,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PeerIdentityInnerData {
+    identity_key: [u8; 32],
+    sign_key: [u8; 32],
+}
+
+impl Serialize for PeerIdentityInner {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let data = PeerIdentityInnerData {
+            identity_key: self.identity_key.as_bytes().clone(),
+            sign_key: self.sign_key.to_bytes().clone(),
+        };
+        data.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for PeerIdentityInner {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let data = PeerIdentityInnerData::deserialize(deserializer)?;
+        Ok(PeerIdentityInner {
+            identity_key: x25519_dalek::PublicKey::from(data.identity_key),
+            sign_key: ed25519_dalek::VerifyingKey::from_bytes(&data.sign_key)
+                .map_err(serde::de::Error::custom)?,
+        })
+    }
 }
 
 impl IdentityCommon for PeerIdentityInner {
@@ -87,10 +125,45 @@ impl IdentityCommon for PeerIdentityInner {
     }
 }
 
+#[derive(Clone)]
 pub struct LocalIdentityInner {
     public_keys: PeerIdentityInner,
     private_key: x25519_dalek::StaticSecret,
     private_sign_key: ed25519_dalek::SigningKey,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct LocalIdentityInnerData {
+    public_keys: PeerIdentityInner,
+    private_key: [u8; 32],
+    private_sign_public: [u8; 32],
+    private_sign_private: [u8; 32],
+}
+
+impl Serialize for LocalIdentityInner {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let data = LocalIdentityInnerData {
+            public_keys: self.public_keys.clone(),
+            private_key: self.private_key.to_bytes(),
+            private_sign_public: self.private_sign_key.to_bytes(),
+            private_sign_private: self.private_sign_key.to_bytes(),
+        };
+        data.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for LocalIdentityInner {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let data = LocalIdentityInnerData::deserialize(deserializer)?;
+        Ok(LocalIdentityInner {
+            public_keys: data.public_keys,
+            private_key: x25519_dalek::StaticSecret::from(data.private_key),
+            private_sign_key: ed25519_dalek::SigningKey::from_bytes(&data.private_sign_private),
+        })
+    }
 }
 
 impl Debug for LocalIdentityInner {
@@ -148,7 +221,10 @@ impl LocalIdentity for LocalIdentityInner {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct IdentityHandle([u8; 16]);
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Identity {
     Local(LocalIdentityInner),
     Peer(PeerIdentityInner),
@@ -193,11 +269,6 @@ impl Identity {
             private_sign_key,
         };
         Identity::Local(local_identity)
-    }
-
-    pub fn hex_hash(&self) -> String {
-        let hash = self.truncated_hash();
-        hex::encode(hash)
     }
 }
 
@@ -276,5 +347,21 @@ mod test {
                 signature: signature.to_vec(),
             }))
             .is_err());
+    }
+
+    #[test]
+    fn test_local_identity_serialize() {
+        let identity = super::Identity::new_local();
+        let serialized = rmp_serde::to_vec(&identity).unwrap();
+        let deserialized: super::Identity = rmp_serde::from_slice(&serialized).unwrap();
+        assert_eq!(identity.hex_hash(), deserialized.hex_hash());
+        // We don't have visibility into the private keys, so encrypt and decrypt to confirm they're the same.
+        let message = b"Hello, world!";
+        let encrypted = identity.encrypt_for(message).unwrap();
+        let decrypted = match deserialized {
+            super::Identity::Local(identity) => identity.decrypt(&encrypted).unwrap(),
+            _ => panic!("Expected local identity"),
+        };
+        assert_eq!(message, decrypted.as_slice());
     }
 }
