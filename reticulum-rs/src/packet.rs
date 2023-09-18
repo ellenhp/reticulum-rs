@@ -7,3 +7,5 @@ pub trait EncryptedMessage {
     fn public_key(&self) -> &[u8];
     fn encrypted_data(&self) -> &[u8];
 }
+
+pub struct Packet {}

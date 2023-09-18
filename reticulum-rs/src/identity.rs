@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::{cell::RefCell, fmt::Debug};
 
 use base64::Engine;
 use ed25519_dalek::{DigestSigner, Signer, Verifier};
@@ -20,13 +20,15 @@ pub enum CryptoError {
 pub trait IdentityCommon {
     fn encrypt_for(&self, message: &[u8]) -> Result<Vec<u8>, CryptoError>;
     fn verify_from(&self, message: Box<dyn SignedMessage>) -> Result<(), CryptoError>;
-    fn salt(&self) -> [u8; 16];
+    fn truncated_hash(&self) -> [u8; 16];
 }
 
 pub trait LocalIdentity {
     fn decrypt(&self, message: &[u8]) -> Result<Vec<u8>, CryptoError>;
     fn sign(&self, message: &[u8]) -> Result<Vec<u8>, CryptoError>;
 }
+
+#[derive(Debug)]
 pub struct PeerIdentityInner {
     identity_key: x25519_dalek::PublicKey,
     sign_key: ed25519_dalek::VerifyingKey,
@@ -38,7 +40,7 @@ impl IdentityCommon for PeerIdentityInner {
         let ephemeral_pubkey = PublicKey::from(&ephemeral_key);
         let shared_secret = ephemeral_key.diffie_hellman(&self.identity_key);
 
-        let salt = self.salt();
+        let salt = self.truncated_hash();
         let ikm = shared_secret.as_bytes();
         let hkdf = Hkdf::<Sha256>::new(Some(&salt), ikm);
         let mut okm = [0u8; 32];
@@ -74,14 +76,14 @@ impl IdentityCommon for PeerIdentityInner {
         }
     }
 
-    fn salt(&self) -> [u8; 16] {
+    fn truncated_hash(&self) -> [u8; 16] {
         let pubkey_bytes = self.identity_key.as_bytes();
         let mut hasher = Sha256::new();
         hasher.update(pubkey_bytes);
         let hash = hasher.finalize();
-        let mut salt = [0u8; 16];
-        salt.copy_from_slice(&hash[0..16]);
-        salt
+        let mut truncated_hash = [0u8; 16];
+        truncated_hash.copy_from_slice(&hash[0..16]);
+        truncated_hash
     }
 }
 
@@ -89,6 +91,14 @@ pub struct LocalIdentityInner {
     public_keys: PeerIdentityInner,
     private_key: x25519_dalek::StaticSecret,
     private_sign_key: ed25519_dalek::SigningKey,
+}
+
+impl Debug for LocalIdentityInner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LocalIdentityInner")
+            .field("public_keys", &self.public_keys)
+            .finish()
+    }
 }
 
 impl IdentityCommon for LocalIdentityInner {
@@ -100,8 +110,8 @@ impl IdentityCommon for LocalIdentityInner {
         self.public_keys.verify_from(message)
     }
 
-    fn salt(&self) -> [u8; 16] {
-        self.public_keys.salt()
+    fn truncated_hash(&self) -> [u8; 16] {
+        self.public_keys.truncated_hash()
     }
 }
 
@@ -113,7 +123,7 @@ impl LocalIdentity for LocalIdentityInner {
         let other_pubkey = x25519_dalek::PublicKey::from(dbg!(message_pubkey).clone());
         let shared_secret = self.private_key.diffie_hellman(&other_pubkey);
 
-        let salt = self.salt();
+        let salt = self.truncated_hash();
         let ikm = shared_secret.as_bytes();
         let hkdf = Hkdf::<Sha256>::new(Some(&salt), ikm);
         let mut okm = [0u8; 32];
@@ -138,6 +148,7 @@ impl LocalIdentity for LocalIdentityInner {
     }
 }
 
+#[derive(Debug)]
 pub enum Identity {
     Local(LocalIdentityInner),
     Peer(PeerIdentityInner),
@@ -158,10 +169,10 @@ impl IdentityCommon for Identity {
         }
     }
 
-    fn salt(&self) -> [u8; 16] {
+    fn truncated_hash(&self) -> [u8; 16] {
         match self {
-            Identity::Local(local_identity) => local_identity.salt(),
-            Identity::Peer(peer_identity) => peer_identity.salt(),
+            Identity::Local(local_identity) => local_identity.truncated_hash(),
+            Identity::Peer(peer_identity) => peer_identity.truncated_hash(),
         }
     }
 }
@@ -182,6 +193,11 @@ impl Identity {
             private_sign_key,
         };
         Identity::Local(local_identity)
+    }
+
+    pub fn hex_hash(&self) -> String {
+        let hash = self.truncated_hash();
+        hex::encode(hash)
     }
 }
 
