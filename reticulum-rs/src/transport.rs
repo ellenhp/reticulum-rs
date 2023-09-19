@@ -1,6 +1,10 @@
 use std::{error::Error, sync::Arc, thread};
 
-use smol::{lock::Mutex, Task};
+use smol::{
+    channel::{Receiver, Sender},
+    lock::Mutex,
+    Task,
+};
 
 use crate::{
     identity::IdentityCommon,
@@ -76,19 +80,30 @@ impl Transport {
     }
 
     fn spawn_processing_tasks(interfaces: Vec<Arc<dyn Interface>>) -> Result<(), TransportError> {
+        let (packet_sender, packet_receiver) = smol::channel::bounded(32);
         for interface in interfaces {
             let interface = interface.clone();
+            let packet_sender = packet_sender.clone();
             smol::spawn(async move {
                 let interface = interface;
                 println!("Starting interface processing task");
-                Self::process_interface(interface.clone()).await
+                Self::recv_from_interface(interface.clone(), packet_sender.clone()).await
             })
             .detach();
         }
+        smol::spawn(async move {
+            let packet_receiver = packet_receiver;
+            println!("Starting packet processing task");
+            Self::process_packets(packet_receiver).await;
+        })
+        .detach();
         Ok(())
     }
 
-    async fn process_interface(interface: Arc<dyn crate::interface::Interface>) {
+    async fn recv_from_interface(
+        interface: Arc<dyn crate::interface::Interface>,
+        packet_sender: Sender<Packet>,
+    ) {
         loop {
             let interface = interface.clone();
             let future = async move { interface.recv().await };
@@ -103,7 +118,42 @@ impl Transport {
                     break;
                 }
             };
-            println!("Received message: {:?}", message);
+            let packet = match Packet::unpack(&message) {
+                Ok(packet) => packet,
+                Err(_) => {
+                    println!("Failed to unpack packet");
+                    continue;
+                }
+            };
+            println!("Received packet: {:?}", packet);
+            if let Err(err) = packet_sender.send(packet).await {
+                println!("Failed to send packet to processing task: {:?}", err);
+            }
+        }
+    }
+
+    async fn process_packets(packet_receiver: Receiver<Packet>) {
+        loop {
+            let packet = if let Ok(packet) = packet_receiver.recv().await {
+                packet
+            } else {
+                println!("Failed to receive packet from interface");
+                continue;
+            };
+            match packet.header() {
+                crate::packet::PacketHeader::LrProof(common, hash) => {
+                    println!("Common: {:?}", common);
+                    println!("Received LR proof: {:?}", hash);
+                }
+                crate::packet::PacketHeader::Header1(common, header1) => {
+                    println!("Common: {:?}", common);
+                    println!("Received header1: {:?}", header1);
+                }
+                crate::packet::PacketHeader::Header2(common, header2) => {
+                    println!("Common: {:?}", common);
+                    println!("Received header2: {:?}", header2);
+                }
+            }
         }
     }
 }

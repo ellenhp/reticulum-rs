@@ -48,6 +48,24 @@ pub struct PacketHeaderCommon {
     hops: u8,
 }
 
+impl PacketHeaderCommon {
+    pub fn header_type(&self) -> HeaderType {
+        self.header_type
+    }
+    pub fn transport_type(&self) -> TransportType {
+        self.transport_type
+    }
+    pub fn destination_type(&self) -> DestinationType {
+        self.destination_type
+    }
+    pub fn packet_type(&self) -> PacketType {
+        self.packet_type
+    }
+    pub fn hops(&self) -> u8 {
+        self.hops
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, PackedStruct)]
 #[packed_struct(bit_numbering = "msb0")]
 
@@ -57,6 +75,15 @@ pub struct PacketHeader1 {
     // Packet context type.
     #[packed_field(bytes = "16", ty = "enum")]
     context_type: PacketContextType,
+}
+
+impl PacketHeader1 {
+    pub fn destination_hash(&self) -> TruncatedHash {
+        TruncatedHash(self.destination_hash)
+    }
+    pub fn context_type(&self) -> PacketContextType {
+        self.context_type
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, PackedStruct)]
@@ -70,6 +97,18 @@ pub struct PacketHeader2 {
     // Packet context type.
     #[packed_field(bytes = "32", ty = "enum")]
     context_type: PacketContextType,
+}
+
+impl PacketHeader2 {
+    pub fn transport_id(&self) -> TruncatedHash {
+        TruncatedHash(self.transport_id)
+    }
+    pub fn destination_hash(&self) -> TruncatedHash {
+        TruncatedHash(self.destination_hash)
+    }
+    pub fn context_type(&self) -> PacketContextType {
+        self.context_type
+    }
 }
 
 #[derive(PrimitiveEnum, Debug, Copy, Clone, PartialEq)]
@@ -286,6 +325,10 @@ impl Packet {
             header,
             payload: payload.to_vec(),
         })
+    }
+
+    pub fn header(&self) -> &PacketHeader {
+        &self.header
     }
 
     fn should_encrypt_payload(header: &PacketHeader) -> bool {

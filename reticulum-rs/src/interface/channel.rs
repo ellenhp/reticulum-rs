@@ -42,9 +42,7 @@ impl Interface for ChannelInterface {
     }
 
     async fn recv(&self) -> Result<Vec<u8>, InterfaceError> {
-        println!("recv");
         let recv = self.receiver.lock().await;
-        println!("recv2");
         dbg!(recv.recv().await.map_err(|err| {
             InterfaceError::Unspecified(format!("failed to receive message: {:?}", err))
         }))
