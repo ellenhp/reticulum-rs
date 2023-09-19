@@ -13,6 +13,8 @@ pub enum InterfaceError {
     Unspecified(String),
 }
 
+pub type InterfaceHandle = [u8; 8];
+
 #[async_trait]
 pub trait Interface: Debug + Send + Sync {
     async fn queue_send(&self, message: &[u8]) -> Result<(), InterfaceError>;

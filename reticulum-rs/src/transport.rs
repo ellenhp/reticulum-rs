@@ -9,7 +9,10 @@ use smol::{
 use crate::{
     identity::IdentityCommon,
     interface::{self, Interface, InterfaceError},
-    packet::{Packet, PacketContextType, PacketType, TransportType},
+    packet::{
+        AnnouncePacket, PacketContextType, PacketHeaderVariable, PacketType, TransportType,
+        WirePacket,
+    },
     persistence::{DestinationStore, IdentityStore, PersistenceError},
 };
 
@@ -43,7 +46,7 @@ impl Transport {
         })
     }
 
-    pub async fn announce(&self) -> Result<(), TransportError> {
+    pub async fn force_announce_all_local(&self) -> Result<(), TransportError> {
         let self_identities = self
             .identity_store
             .get_self_identities()
@@ -56,18 +59,14 @@ impl Transport {
                 .await
                 .map_err(|err| TransportError::Persistence(err))?;
             for destination in destinations {
-                let packet = Packet::new_without_transport(
-                    PacketType::Announce,
-                    PacketContextType::None,
-                    TransportType::Broadcast,
-                    &destination,
-                    Vec::new(),
-                )
-                .map_err(|err| TransportError::Unspecified(Box::new(err)))?;
+                // Packet response doesn't make sense here if the intention is to force an announce.
+                let packet = AnnouncePacket::new(destination, PacketContextType::None)
+                    .map_err(|err| TransportError::Unspecified(Box::new(err)))?;
 
                 for interface in self.interfaces.clone() {
                     let interface = interface.clone();
                     let message = packet
+                        .wire_packet()
                         .pack()
                         .map_err(|err| TransportError::Unspecified(Box::new(err)))?;
                     let interface = interface;
@@ -102,7 +101,7 @@ impl Transport {
 
     async fn recv_from_interface(
         interface: Arc<dyn crate::interface::Interface>,
-        packet_sender: Sender<Packet>,
+        packet_sender: Sender<WirePacket>,
     ) {
         loop {
             let interface = interface.clone();
@@ -118,7 +117,7 @@ impl Transport {
                     break;
                 }
             };
-            let packet = match Packet::unpack(&message) {
+            let packet = match WirePacket::unpack(&message) {
                 Ok(packet) => packet,
                 Err(_) => {
                     println!("Failed to unpack packet");
@@ -132,25 +131,32 @@ impl Transport {
         }
     }
 
-    async fn process_packets(packet_receiver: Receiver<Packet>) {
+    async fn announce_loop(
+        interfaces: Vec<Arc<dyn Interface>>,
+        identity_store: Arc<Box<dyn IdentityStore>>,
+        destination_store: Arc<Box<dyn DestinationStore>>,
+    ) {
+        loop {}
+    }
+
+    async fn process_packets(packet_receiver: Receiver<WirePacket>) {
         loop {
-            let packet = if let Ok(packet) = packet_receiver.recv().await {
+            let packet = packet_receiver.recv();
+            let packet = if let Ok(packet) = packet.await {
                 packet
             } else {
                 println!("Failed to receive packet from interface");
                 continue;
             };
-            match packet.header() {
-                crate::packet::PacketHeader::LrProof(common, hash) => {
-                    println!("Common: {:?}", common);
+            println!("Common: {:?}", packet.header().header_common());
+            match packet.header().header_variable() {
+                PacketHeaderVariable::LrProof(hash) => {
                     println!("Received LR proof: {:?}", hash);
                 }
-                crate::packet::PacketHeader::Header1(common, header1) => {
-                    println!("Common: {:?}", common);
+                PacketHeaderVariable::Header1(header1) => {
                     println!("Received header1: {:?}", header1);
                 }
-                crate::packet::PacketHeader::Header2(common, header2) => {
-                    println!("Common: {:?}", common);
+                PacketHeaderVariable::Header2(header2) => {
                     println!("Received header2: {:?}", header2);
                 }
             }

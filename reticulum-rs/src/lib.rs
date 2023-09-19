@@ -79,7 +79,7 @@ mod test {
         smol::block_on(async {
             let interface1 = ChannelInterface::new();
             let interface2 = interface1.clone().await;
-            let (identity1, destination1, node1) = {
+            let (_identity1, _destination1, node1) = {
                 let identity = Identity::new_local();
                 let mut identity_store =
                     Box::new(persistence::in_memory::InMemoryIdentityStore::new());
@@ -102,7 +102,7 @@ mod test {
                 .unwrap();
                 (identity, destination, node)
             };
-            let (identity2, destination2, node2) = {
+            let (_identity2, _destination2, node2) = {
                 let identity = Identity::new_local();
                 let mut identity_store =
                     Box::new(persistence::in_memory::InMemoryIdentityStore::new());
@@ -126,11 +126,11 @@ mod test {
                 (identity, destination, node)
             };
 
-            node1.transport.announce().await.unwrap();
-            node2.transport.announce().await.unwrap();
-            Timer::after(Duration::from_millis(100)).await;
+            node1.transport.force_announce_all_local().await.unwrap();
+            node2.transport.force_announce_all_local().await.unwrap();
             println!("announced");
             Timer::after(Duration::from_millis(100)).await;
+            // TODO: Verify that the announces were received.
         });
     }
 }

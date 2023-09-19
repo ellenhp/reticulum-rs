@@ -6,7 +6,11 @@ use packed_struct::{
 };
 use serde::de;
 
-use crate::{destination::Destination, identity::CryptoError, TruncatedHash};
+use crate::{
+    destination::Destination,
+    identity::{CryptoError, Identity, IdentityCommon, LocalIdentity},
+    TruncatedHash,
+};
 
 pub trait SignedMessage {
     fn signed_data(&self) -> &[u8];
@@ -167,37 +171,59 @@ pub enum PacketContextType {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum PacketHeader {
-    LrProof(PacketHeaderCommon, TruncatedHash),
-    Header1(PacketHeaderCommon, PacketHeader1),
-    Header2(PacketHeaderCommon, PacketHeader2),
+pub enum PacketHeaderVariable {
+    LrProof(TruncatedHash),
+    Header1(PacketHeader1),
+    Header2(PacketHeader2),
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct Packet {
+pub struct PacketHeader {
+    header_common: PacketHeaderCommon,
+    header_variable: PacketHeaderVariable,
+}
+
+impl PacketHeader {
+    pub fn header_common(&self) -> &PacketHeaderCommon {
+        &self.header_common
+    }
+    pub fn header_variable(&self) -> &PacketHeaderVariable {
+        &self.header_variable
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct WirePacket {
+    header_common: PacketHeaderCommon,
     header: PacketHeader,
     payload: Vec<u8>,
 }
 
-impl Packet {
+impl WirePacket {
     pub fn new_lrproof(
         packet_type: PacketType,
         transport_type: TransportType,
         destination_link_hash: TruncatedHash,
         payload: Vec<u8>,
-    ) -> Packet {
-        let header = PacketHeader::LrProof(
-            PacketHeaderCommon {
-                header_type: HeaderType::Header2,
-                transport_type,
-                destination_type: DestinationType::Link,
-                packet_type,
-                hops: 0,
-            },
-            destination_link_hash,
-        );
-        debug_assert!(!Self::should_encrypt_payload(&header));
-        Packet { header, payload }
+    ) -> WirePacket {
+        let header_common = PacketHeaderCommon {
+            header_type: HeaderType::Header2,
+            transport_type,
+            destination_type: DestinationType::Link,
+            packet_type,
+            hops: 0,
+        };
+        let header_variable = PacketHeaderVariable::LrProof(destination_link_hash);
+        let header = PacketHeader {
+            header_common: header_common.clone(),
+            header_variable,
+        };
+        debug_assert!(!Self::should_encrypt_payload(&header_common, &header));
+        WirePacket {
+            header_common: header_common.clone(),
+            header,
+            payload,
+        }
     }
 
     pub fn new_without_transport(
@@ -206,26 +232,32 @@ impl Packet {
         transport_type: TransportType,
         destination: &Destination,
         payload: Vec<u8>,
-    ) -> Result<Packet, PacketError> {
-        let header = PacketHeader::Header1(
-            PacketHeaderCommon {
-                header_type: HeaderType::Header1,
-                transport_type,
-                destination_type: destination.destination_type(),
-                packet_type,
-                hops: 0,
-            },
-            PacketHeader1 {
-                destination_hash: destination.truncated_hash(),
-                context_type,
-            },
-        );
-        let payload = if Self::should_encrypt_payload(&header) {
+    ) -> Result<WirePacket, PacketError> {
+        let header_common = PacketHeaderCommon {
+            header_type: HeaderType::Header1,
+            transport_type,
+            destination_type: destination.destination_type(),
+            packet_type,
+            hops: 0,
+        };
+        let header_variable = PacketHeaderVariable::Header1(PacketHeader1 {
+            destination_hash: destination.truncated_hash().0,
+            context_type,
+        });
+        let header = PacketHeader {
+            header_common: header_common.clone(),
+            header_variable,
+        };
+        let payload = if Self::should_encrypt_payload(&header_common, &header) {
             destination.encrypt(payload)?
         } else {
             payload
         };
-        Ok(Packet { header, payload })
+        Ok(WirePacket {
+            header_common: header_common.clone(),
+            header,
+            payload,
+        })
     }
 
     pub fn new_with_transport(
@@ -235,58 +267,55 @@ impl Packet {
         transport_id: &Destination, // maybe an identity here?
         destination: &Destination,
         payload: Vec<u8>,
-    ) -> Result<Packet, PacketError> {
-        let header = PacketHeader::Header2(
-            PacketHeaderCommon {
-                header_type: HeaderType::Header2,
-                transport_type,
-                destination_type: destination.destination_type(),
-                packet_type,
-                hops: 0,
-            },
-            PacketHeader2 {
-                transport_id: transport_id.truncated_hash(),
-                destination_hash: destination.truncated_hash(),
-                context_type,
-            },
-        );
-        let payload = if Self::should_encrypt_payload(&header) {
+    ) -> Result<WirePacket, PacketError> {
+        let header_common = PacketHeaderCommon {
+            header_type: HeaderType::Header2,
+            transport_type,
+            destination_type: destination.destination_type(),
+            packet_type,
+            hops: 0,
+        };
+        let header_variable = PacketHeaderVariable::Header2(PacketHeader2 {
+            transport_id: transport_id.truncated_hash().0,
+            destination_hash: destination.truncated_hash().0,
+            context_type,
+        });
+        let header = PacketHeader {
+            header_common: header_common.clone(),
+            header_variable,
+        };
+        let payload = if Self::should_encrypt_payload(&header_common, &header) {
             destination.encrypt(payload)?
         } else {
             payload
         };
-        Ok(Packet { header, payload })
+        Ok(WirePacket {
+            header_common: header_common.clone(),
+            header,
+            payload,
+        })
     }
 
     pub fn pack(&self) -> Result<Vec<u8>, PacketError> {
         let mut packed = Vec::new();
-        match &self.header {
-            PacketHeader::LrProof(common, destination_link_hash) => {
-                packed.extend(
-                    common
-                        .pack()
-                        .map_err(|err| PacketError::PackingError(err))?,
-                );
+        packed.extend(
+            self.header_common
+                .pack()
+                .map_err(|err| PacketError::PackingError(err))?,
+        );
+
+        match &self.header.header_variable {
+            PacketHeaderVariable::LrProof(destination_link_hash) => {
                 packed.extend(destination_link_hash.0);
             }
-            PacketHeader::Header1(common, header1) => {
-                packed.extend(
-                    common
-                        .pack()
-                        .map_err(|err| PacketError::PackingError(err))?,
-                );
+            PacketHeaderVariable::Header1(header1) => {
                 packed.extend(
                     header1
                         .pack()
                         .map_err(|err| PacketError::PackingError(err))?,
                 );
             }
-            PacketHeader::Header2(common, header2) => {
-                packed.extend(
-                    common
-                        .pack()
-                        .map_err(|err| PacketError::PackingError(err))?,
-                );
+            PacketHeaderVariable::Header2(header2) => {
                 packed.extend(
                     header2
                         .pack()
@@ -299,17 +328,17 @@ impl Packet {
         Ok(packed)
     }
 
-    pub fn unpack(raw: &[u8]) -> Result<Packet, PacketError> {
-        let common = PacketHeaderCommon::unpack(&[raw[0], raw[1]])
+    pub fn unpack(raw: &[u8]) -> Result<WirePacket, PacketError> {
+        let header_common = PacketHeaderCommon::unpack(&[raw[0], raw[1]])
             .map_err(|err| PacketError::PackingError(err))?;
-        let (header, payload) = match common.header_type {
+        let (header_variable, payload) = match header_common.header_type {
             HeaderType::Header1 => {
                 let raw_header: &[u8; 17] = raw[2..19]
                     .try_into()
                     .map_err(|_err| PacketError::Unknown("Try from slice failed".to_string()))?;
                 let header1 = PacketHeader1::unpack(raw_header)
                     .map_err(|err| PacketError::PackingError(err))?;
-                (PacketHeader::Header1(common, header1), &raw[19..])
+                (PacketHeaderVariable::Header1(header1), &raw[19..])
             }
             HeaderType::Header2 => {
                 let raw_header: &[u8; 33] = raw[2..35]
@@ -318,10 +347,16 @@ impl Packet {
 
                 let header2 = PacketHeader2::unpack(raw_header)
                     .map_err(|err| PacketError::PackingError(err))?;
-                (PacketHeader::Header2(common, header2), &raw[35..])
+                (PacketHeaderVariable::Header2(header2), &raw[35..])
             }
         };
-        Ok(Packet {
+        let header = PacketHeader {
+            header_common: header_common.clone(),
+            header_variable,
+        };
+
+        Ok(WirePacket {
+            header_common: header_common.clone(),
             header,
             payload: payload.to_vec(),
         })
@@ -331,15 +366,48 @@ impl Packet {
         &self.header
     }
 
-    fn should_encrypt_payload(header: &PacketHeader) -> bool {
-        match header {
-            PacketHeader::LrProof(_common, _destination_link_hash) => {
+    pub fn into_semantic_packet(self) -> Result<Packet, PacketError> {
+        if self.header.header_common.packet_type == PacketType::Announce {
+            if self.payload.len() != 64 + 16 + 16 + 64 {
+                return Err(PacketError::Unknown(
+                    "Announce packet incorrect length".to_string(),
+                ));
+            }
+            let identity = Identity::from_wire_repr(&self.payload[0..64])
+                .map_err(|err| PacketError::CryptoError(err))?;
+            let destination_name_hash = TruncatedHash(
+                self.payload[64..80]
+                    .try_into()
+                    .map_err(|_err| PacketError::Unknown("Try from slice failed".to_string()))?,
+            );
+            let random_hash = TruncatedHash(
+                self.payload[80..96]
+                    .try_into()
+                    .map_err(|_err| PacketError::Unknown("Try from slice failed".to_string()))?,
+            );
+            let signature = self.payload[96..160]
+                .try_into()
+                .map_err(|_err| PacketError::Unknown("Try from slice failed".to_string()))?;
+            return Ok(Packet::Announce(AnnouncePacket {
+                identity,
+                destination_name_hash,
+                random_hash,
+                signature,
+                wire_packet: self,
+            }));
+        }
+        return Ok(Packet::Other(self));
+    }
+
+    fn should_encrypt_payload(header_common: &PacketHeaderCommon, header: &PacketHeader) -> bool {
+        match &header.header_variable {
+            PacketHeaderVariable::LrProof(_destination_link_hash) => {
                 return false;
             }
-            PacketHeader::Header1(common, header1) => {
-                let packet_type = common.packet_type;
+            PacketHeaderVariable::Header1(header1) => {
+                let packet_type = header_common.packet_type;
                 let context_type = header1.context_type;
-                let destination_type = common.destination_type;
+                let destination_type = header_common.destination_type;
                 if packet_type == PacketType::Announce {
                     return false;
                 }
@@ -365,8 +433,8 @@ impl Packet {
                 }
                 return true;
             }
-            PacketHeader::Header2(common, _header2) => {
-                let packet_type = common.packet_type;
+            PacketHeaderVariable::Header2(_header2) => {
+                let packet_type = header_common.packet_type;
                 if packet_type == PacketType::Announce {
                     return false;
                 }
@@ -376,19 +444,102 @@ impl Packet {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct AnnouncePacket {
+    identity: Identity,
+    destination_name_hash: TruncatedHash,
+    random_hash: TruncatedHash,
+    signature: [u8; 64],
+    wire_packet: WirePacket,
+}
+
+impl AnnouncePacket {
+    pub fn new(
+        destination: Destination,
+        path_context: PacketContextType,
+    ) -> Result<AnnouncePacket, PacketError> {
+        if path_context != PacketContextType::None
+            && path_context != PacketContextType::PathResponse
+        {
+            return Err(PacketError::Unknown(
+                "Announce packet path context not supported".to_string(),
+            ));
+        }
+        let identity = destination
+            .identity()
+            .ok_or(PacketError::AnnounceDestinationNotSingle)?;
+        let destination_name_hash = destination.truncated_hash();
+        let random_hash = TruncatedHash(rand::random());
+        let mut payload = [0u8; 160];
+        payload[0..64].copy_from_slice(&identity.wire_repr());
+        payload[64..80].copy_from_slice(&destination_name_hash.0);
+        payload[80..96].copy_from_slice(&random_hash.0);
+        if let Identity::Local(local) = identity {
+            let signature = local
+                .sign(&payload[0..96])
+                .map_err(|err| PacketError::CryptoError(err))?;
+            payload[96..160].copy_from_slice(&signature);
+        } else {
+            return Err(PacketError::Unknown(
+                "Announce packet identity not local".to_string(),
+            ));
+        }
+        let wire_packet = WirePacket::new_without_transport(
+            PacketType::Announce,
+            path_context,
+            TransportType::Broadcast,
+            &destination,
+            payload.to_vec(),
+        )?;
+        Ok(AnnouncePacket {
+            identity: identity.clone(),
+            destination_name_hash: destination_name_hash,
+            random_hash,
+            signature: payload[96..160]
+                .try_into()
+                .map_err(|_err| PacketError::Unknown("Try from slice failed".to_string()))?,
+            wire_packet,
+        })
+    }
+    pub fn identity(&self) -> &Identity {
+        &self.identity
+    }
+    pub fn destination_name_hash(&self) -> TruncatedHash {
+        self.destination_name_hash
+    }
+    pub fn random_hash(&self) -> TruncatedHash {
+        self.random_hash
+    }
+    pub fn signature(&self) -> &[u8] {
+        &self.signature
+    }
+    pub fn wire_packet(&self) -> &WirePacket {
+        &self.wire_packet
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum Packet {
+    Announce(AnnouncePacket),
+    Other(WirePacket),
+}
+
 #[cfg(test)]
 mod test {
     use crate::{
         destination::{Destination, DestinationBuilder},
-        identity::{self, Identity, LocalIdentity},
-        packet::{Packet, PacketContextType, PacketError, PacketType, TransportType},
+        identity::{self, Identity, IdentityCommon, LocalIdentity},
+        packet::{
+            AnnouncePacket, Packet, PacketContextType, PacketError, PacketType, TransportType,
+            WirePacket,
+        },
     };
 
     #[test]
     fn test_packet() {
         let receiver = Identity::new_local();
         let destination = Destination::builder("app").build_single(&receiver).unwrap();
-        let packet = Packet::new_without_transport(
+        let packet = WirePacket::new_without_transport(
             PacketType::Data,
             PacketContextType::None,
             TransportType::Transport,
@@ -397,7 +548,7 @@ mod test {
         )
         .unwrap();
         let packed = packet.pack().unwrap();
-        let unpacked = Packet::unpack(&packed).unwrap();
+        let unpacked = WirePacket::unpack(&packed).unwrap();
         assert_eq!(packet, unpacked);
         let decrypted = if let Identity::Local(local) = receiver {
             local.decrypt(&unpacked.payload).unwrap()
@@ -405,5 +556,28 @@ mod test {
             panic!("not a local identity");
         };
         assert_eq!(vec![0; 16], decrypted);
+    }
+
+    #[test]
+    fn test_create_and_parse_announce_packet() {
+        let identity = Identity::new_local();
+        let destination = Destination::builder("app").build_single(&identity).unwrap();
+        let packet = AnnouncePacket::new(destination.clone(), PacketContextType::None).unwrap();
+        let wire_packet = packet.wire_packet();
+        let packed = wire_packet.pack().unwrap();
+        let unpacked = WirePacket::unpack(&packed).unwrap();
+        assert_eq!(wire_packet, &unpacked);
+        let semantic = unpacked.into_semantic_packet().unwrap();
+        if let Packet::Announce(announce) = semantic {
+            assert_eq!(announce.identity().wire_repr(), identity.wire_repr());
+            assert_eq!(
+                announce.destination_name_hash(),
+                destination.truncated_hash()
+            );
+            assert_eq!(announce.random_hash(), packet.random_hash());
+            assert_eq!(announce.signature(), packet.signature());
+        } else {
+            panic!("not an announce packet");
+        }
     }
 }

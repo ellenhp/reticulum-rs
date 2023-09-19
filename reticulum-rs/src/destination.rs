@@ -4,7 +4,8 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     identity::{CryptoError, Identity, IdentityCommon},
-    packet::{DestinationType, Packet, PacketError},
+    packet::{DestinationType, PacketError, WirePacket},
+    TruncatedHash,
 };
 
 #[derive(Debug, PartialEq, thiserror::Error)]
@@ -72,7 +73,7 @@ impl Destination {
         &self.aspects
     }
 
-    pub fn get_identity(&self) -> Option<&Identity> {
+    pub fn identity(&self) -> Option<&Identity> {
         match &self.inner {
             DestinationInner::Single(single) => Some(&single.identity),
             _ => None,
@@ -92,18 +93,20 @@ impl Destination {
     }
 
     /// Returns the truncated hash of this destination according to the Reticulum spec.
-    pub fn truncated_hash(&self) -> [u8; 16] {
+    pub fn truncated_hash(&self) -> TruncatedHash {
         let name = self.full_name();
         let mut hasher = Sha256::new();
         hasher.update(name.as_bytes());
-        hasher.finalize()[..16]
-            .try_into()
-            .expect("slice operation must produce 16 bytes")
+        TruncatedHash(
+            hasher.finalize()[..16]
+                .try_into()
+                .expect("slice operation must produce 16 bytes"),
+        )
     }
 
     /// Returns the hex representation of the truncated hash of this destination according to the Reticulum spec.
     pub fn hex_hash(&self) -> String {
-        hex::encode(self.truncated_hash())
+        hex::encode(self.truncated_hash().0)
     }
 
     pub fn destination_type(&self) -> DestinationType {
@@ -245,7 +248,7 @@ mod tests {
         let mut hasher = Sha256::new();
         hasher.update(destination.full_name().as_bytes());
         let hash = hasher.finalize();
-        assert_eq!(destination.truncated_hash(), &hash[..16]);
+        assert_eq!(destination.truncated_hash().0, &hash[..16]);
         assert_eq!(destination.hex_hash(), hex::encode(&hash[..16]));
     }
 

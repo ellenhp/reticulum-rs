@@ -1,11 +1,19 @@
 #[cfg(feature = "stores")]
 pub mod in_memory;
 
+use std::{
+    rc::Rc,
+    sync::Arc,
+    time::{Duration, Instant, SystemTime},
+};
+
 use async_trait::async_trait;
 
 use crate::{
     destination::Destination,
     identity::{self, Identity, IdentityCommon},
+    interface::InterfaceHandle,
+    packet::{AnnouncePacket, Packet},
     TruncatedHash,
 };
 
@@ -68,7 +76,7 @@ pub trait DestinationStore: Send + Sync {
         let all_destinations = self.get_all_destinations().await?;
         let mut matching_destinations = Vec::new();
         for destination in all_destinations {
-            if let Some(identity) = destination.get_identity() {
+            if let Some(identity) = destination.identity() {
                 if &identity.handle() == handle {
                     matching_destinations.push(destination);
                 }
@@ -95,4 +103,87 @@ pub trait DestinationStore: Send + Sync {
         &mut self,
         destination: &Destination,
     ) -> Result<(), PersistenceError>;
+}
+
+pub type AnnounceTableEntryArc = Arc<AnnounceTableEntry>;
+
+#[derive(Debug, Clone)]
+pub struct AnnounceTableEntry {
+    received_time: Instant,
+    retransmit_timeout: Duration,
+    retries: u8,
+    received_from: Option<Identity>,
+    destination: Arc<Destination>,
+    packet: AnnouncePacket,
+    local_rebroadcasts: u8,
+    block_rebroadcasts: bool,
+    attached_interface: Option<InterfaceHandle>,
+}
+
+#[async_trait]
+pub trait AnnounceTable {
+    type AnnounceIterator: Iterator<Item = AnnounceTableEntryArc>;
+
+    async fn table_iter(&self) -> Self::AnnounceIterator;
+
+    async fn push_announce(
+        &mut self,
+        announce: AnnounceTableEntryArc,
+    ) -> Result<(), PersistenceError>;
+
+    async fn expire_announces(&mut self, max_age: Duration) -> Result<(), PersistenceError>;
+
+    async fn get_announce_by_destination(
+        &self,
+        destination: &Destination,
+    ) -> Result<Option<AnnounceTableEntryArc>, PersistenceError> {
+        let all_announces = self.table_iter().await;
+        let mut matching_announces = Vec::new();
+        let mut earliest_receipt = None;
+        for announce in all_announces {
+            if announce.destination.truncated_hash() == destination.truncated_hash() {
+                earliest_receipt = if let Some(receipt) = earliest_receipt {
+                    if announce.received_time < receipt {
+                        Some(announce.received_time)
+                    } else {
+                        Some(receipt)
+                    }
+                } else {
+                    Some(announce.received_time)
+                };
+                matching_announces.push(announce);
+            }
+        }
+        if matching_announces.is_empty() {
+            return Ok(None);
+        }
+        let earliest_receipt = if let Some(earliest_receipt) = earliest_receipt {
+            earliest_receipt
+        } else {
+            println!("no earliest receipt, but have packets, this should be unreachable");
+            return Ok(None);
+        };
+        let mut best_latency = u64::MAX;
+        let mut top_announce = None;
+        for announce in matching_announces {
+            let hops = announce
+                .packet
+                .wire_packet()
+                .header()
+                .header_common()
+                .hops() as i32;
+            let age_seconds = announce
+                .received_time
+                .duration_since(earliest_receipt)
+                .as_secs();
+            // Penalize hops by assuming they take about 15 minutes.
+            let estimated_latency = (hops as u64 * 60 * 15) + age_seconds;
+            if estimated_latency < best_latency {
+                best_latency = estimated_latency;
+                top_announce = Some(announce);
+            }
+        }
+
+        Ok(top_announce)
+    }
 }

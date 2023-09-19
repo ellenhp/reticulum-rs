@@ -33,6 +33,7 @@ pub trait IdentityCommon {
     fn handle(&self) -> TruncatedHash {
         TruncatedHash(self.truncated_hash())
     }
+    fn wire_repr(&self) -> [u8; 64];
 }
 
 pub trait LocalIdentity {
@@ -127,6 +128,13 @@ impl IdentityCommon for PeerIdentityInner {
         truncated_hash.copy_from_slice(&hash[0..16]);
         truncated_hash
     }
+
+    fn wire_repr(&self) -> [u8; 64] {
+        let mut public_keys = [0u8; 64];
+        public_keys[0..32].copy_from_slice(self.identity_key.as_bytes());
+        public_keys[32..64].copy_from_slice(self.sign_key.as_bytes());
+        public_keys
+    }
 }
 
 #[derive(Clone)]
@@ -190,6 +198,10 @@ impl IdentityCommon for LocalIdentityInner {
     fn truncated_hash(&self) -> [u8; 16] {
         self.public_keys.truncated_hash()
     }
+
+    fn wire_repr(&self) -> [u8; 64] {
+        self.public_keys.wire_repr()
+    }
 }
 
 impl LocalIdentity for LocalIdentityInner {
@@ -252,6 +264,13 @@ impl IdentityCommon for Identity {
             Identity::Peer(peer_identity) => peer_identity.truncated_hash(),
         }
     }
+
+    fn wire_repr(&self) -> [u8; 64] {
+        match self {
+            Identity::Local(local_identity) => local_identity.wire_repr(),
+            Identity::Peer(peer_identity) => peer_identity.wire_repr(),
+        }
+    }
 }
 
 impl Identity {
@@ -270,6 +289,26 @@ impl Identity {
             private_sign_key,
         };
         Identity::Local(local_identity)
+    }
+
+    pub fn from_wire_repr(wire_repr: &[u8]) -> Result<Identity, CryptoError> {
+        if wire_repr.len() != 64 {
+            return Err(CryptoError::InvalidKey);
+        }
+        let identity_key_bytes: [u8; 32] = wire_repr[0..32]
+            .try_into()
+            .expect("Slice must yield 32 bytes");
+        let identity_key = x25519_dalek::PublicKey::from(identity_key_bytes);
+        let sign_key_bytes: [u8; 32] = wire_repr[32..64]
+            .try_into()
+            .expect("Slice must yield 32 bytes");
+        let sign_key = ed25519_dalek::VerifyingKey::from_bytes(&sign_key_bytes)
+            .map_err(|_| CryptoError::InvalidKey)?;
+        let peer_identity = PeerIdentityInner {
+            identity_key,
+            sign_key,
+        };
+        Ok(Identity::Peer(peer_identity))
     }
 }
 
