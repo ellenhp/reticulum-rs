@@ -1,3 +1,6 @@
+#[cfg(feature = "stores")]
+pub mod in_memory;
+
 use async_trait::async_trait;
 
 use crate::{
@@ -13,11 +16,13 @@ pub enum PersistenceError {
 }
 
 pub struct IdentityMetadata(pub Vec<u8>);
-pub trait IdentityStore {
-    fn get_all_identities(&self) -> Result<Vec<Identity>, PersistenceError>;
 
-    fn get_self_identities(&self) -> Result<Vec<Identity>, PersistenceError> {
-        let all_identities = self.get_all_identities()?;
+#[async_trait]
+pub trait IdentityStore: Send + Sync {
+    async fn get_all_identities(&self) -> Result<Vec<Identity>, PersistenceError>;
+
+    async fn get_self_identities(&self) -> Result<Vec<Identity>, PersistenceError> {
+        let all_identities = self.get_all_identities().await?;
         let mut self_identities = Vec::new();
         for identity in all_identities {
             match identity {
@@ -28,8 +33,11 @@ pub trait IdentityStore {
         Ok(self_identities)
     }
 
-    fn get_identity_by_handle(&self, handle: &TruncatedHash) -> Result<Identity, PersistenceError> {
-        let all_identities = self.get_all_identities()?;
+    async fn get_identity_by_handle(
+        &self,
+        handle: &TruncatedHash,
+    ) -> Result<Identity, PersistenceError> {
+        let all_identities = self.get_all_identities().await?;
         for identity in all_identities {
             if &identity.handle() == handle {
                 return Ok(identity);
@@ -41,17 +49,17 @@ pub trait IdentityStore {
         )))
     }
 
-    fn add_identity(
-        &self,
+    async fn add_identity(
+        &mut self,
         identity: &Identity,
         metadata: &IdentityMetadata,
     ) -> Result<(), PersistenceError>;
 
-    fn remove_identity(&self, identity: &Identity) -> Result<(), PersistenceError>;
+    async fn remove_identity(&mut self, identity: &Identity) -> Result<(), PersistenceError>;
 }
 
 #[async_trait]
-pub trait DestinationStore {
+pub trait DestinationStore: Send + Sync {
     async fn get_all_destinations(&self) -> Result<Vec<Destination>, PersistenceError>;
     async fn get_destinations_by_identity_handle(
         &self,
@@ -81,4 +89,10 @@ pub trait DestinationStore {
         }
         Ok(matching_destinations)
     }
+
+    async fn add_destination(&mut self, destination: &Destination) -> Result<(), PersistenceError>;
+    async fn remove_destination(
+        &mut self,
+        destination: &Destination,
+    ) -> Result<(), PersistenceError>;
 }

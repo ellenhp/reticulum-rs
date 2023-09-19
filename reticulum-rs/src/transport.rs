@@ -1,68 +1,109 @@
 use std::{error::Error, sync::Arc, thread};
 
+use smol::{lock::Mutex, Task};
+
 use crate::{
-    interface::{InterfaceError, Interfaces},
-    persistence::{DestinationStore, IdentityStore},
+    identity::IdentityCommon,
+    interface::{self, Interface, InterfaceError},
+    packet::{Packet, PacketContextType, PacketType, TransportType},
+    persistence::{DestinationStore, IdentityStore, PersistenceError},
 };
 
 #[derive(Debug, thiserror::Error)]
 pub enum TransportError {
     #[error("threading error: {0}")]
     Thread(Box<dyn Error>),
+    #[error("persistence error: {0}")]
+    Persistence(PersistenceError),
     #[error("unspecified error: {0}")]
     Unspecified(Box<dyn Error>),
 }
 
 pub(crate) struct Transport {
-    processing_threads: Vec<thread::JoinHandle<()>>,
+    interfaces: Vec<Arc<dyn Interface>>,
     identity_store: Arc<Box<dyn IdentityStore>>,
     destination_store: Arc<Box<dyn DestinationStore>>,
 }
 
 impl Transport {
     pub fn new(
-        interfaces: Interfaces,
+        interfaces: Vec<Arc<dyn Interface>>,
         identity_store: Arc<Box<dyn IdentityStore>>,
         destination_store: Arc<Box<dyn DestinationStore>>,
     ) -> Result<Transport, TransportError> {
-        let processing_threads = Transport::spawn_processing_threads(interfaces)?;
+        Transport::spawn_processing_tasks(interfaces.clone())?;
         Ok(Transport {
-            processing_threads,
             identity_store,
             destination_store,
+            interfaces,
         })
     }
 
-    fn spawn_processing_threads(
-        interfaces: Interfaces,
-    ) -> Result<Vec<thread::JoinHandle<()>>, TransportError> {
-        let mut handles = Vec::new();
-        for interface in interfaces {
-            handles.push(
-                thread::Builder::new()
-                    .stack_size(4096)
-                    .spawn(move || {
-                        smol::block_on(async move {
-                            loop {
-                                let message = interface.recv().await;
-                                match message {
-                                    Ok(message) => {
-                                        println!("received message: {:?}", message);
-                                    }
-                                    Err(InterfaceError::Recoverable(err)) => {
-                                        println!("recoverable error receiving message: {:?}", err);
-                                    }
-                                    Err(err) => {
-                                        println!("error receiving message: {:?}", err);
-                                        break;
-                                    }
-                                }
-                            }
-                        });
-                    })
-                    .map_err(|err| TransportError::Thread(Box::new(err)))?,
-            );
+    pub async fn announce(&self) -> Result<(), TransportError> {
+        let self_identities = self
+            .identity_store
+            .get_self_identities()
+            .await
+            .map_err(|err| TransportError::Unspecified(Box::new(err)))?;
+        for identity in self_identities {
+            let destinations = self
+                .destination_store
+                .get_destinations_by_identity_handle(&identity.handle())
+                .await
+                .map_err(|err| TransportError::Persistence(err))?;
+            for destination in destinations {
+                let packet = Packet::new_without_transport(
+                    PacketType::Announce,
+                    PacketContextType::None,
+                    TransportType::Broadcast,
+                    &destination,
+                    Vec::new(),
+                )
+                .map_err(|err| TransportError::Unspecified(Box::new(err)))?;
+
+                for interface in self.interfaces.clone() {
+                    let interface = interface.clone();
+                    let message = packet
+                        .pack()
+                        .map_err(|err| TransportError::Unspecified(Box::new(err)))?;
+                    let interface = interface;
+                    let message = message;
+                    interface.queue_send(&message).await.unwrap();
+                }
+            }
         }
-        Ok(handles)
+        Ok(())
+    }
+
+    fn spawn_processing_tasks(interfaces: Vec<Arc<dyn Interface>>) -> Result<(), TransportError> {
+        for interface in interfaces {
+            let interface = interface.clone();
+            smol::spawn(async move {
+                let interface = interface;
+                println!("Starting interface processing task");
+                Self::process_interface(interface.clone()).await
+            })
+            .detach();
+        }
+        Ok(())
+    }
+
+    async fn process_interface(interface: Arc<dyn crate::interface::Interface>) {
+        loop {
+            let interface = interface.clone();
+            let future = async move { interface.recv().await };
+            let message = match future.await {
+                Ok(message) => message,
+                Err(InterfaceError::Recoverable(inner)) => {
+                    println!("Recoverable error: {:?}", inner);
+                    continue;
+                }
+                Err(inner) => {
+                    println!("Unrecoverable error: {:?}", inner);
+                    break;
+                }
+            };
+            println!("Received message: {:?}", message);
+        }
     }
 }

@@ -1,3 +1,6 @@
+#[cfg(feature = "interfaces")]
+pub mod channel;
+
 use std::{error::Error, fmt::Debug, sync::Arc};
 
 use async_trait::async_trait;
@@ -11,9 +14,7 @@ pub enum InterfaceError {
 }
 
 #[async_trait]
-pub trait Interface: Debug + Send {
-    fn queue_send(&self, message: &[u8]) -> Result<(), InterfaceError>;
+pub trait Interface: Debug + Send + Sync {
+    async fn queue_send(&self, message: &[u8]) -> Result<(), InterfaceError>;
     async fn recv(&self) -> Result<Vec<u8>, InterfaceError>;
 }
-
-pub(super) type Interfaces = Vec<Box<dyn Interface>>;
