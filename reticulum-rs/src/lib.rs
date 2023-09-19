@@ -7,6 +7,7 @@ use interface::{Interface, InterfaceError, Interfaces};
 use persistence::{DestinationStore, IdentityStore, PersistenceError};
 use transport::{Transport, TransportError};
 
+pub mod constants;
 pub mod destination;
 pub mod identity;
 pub mod interface;
@@ -25,6 +26,9 @@ pub enum ReticulumError {
     #[error("unspecified error, inner: {0}")]
     Unspecified(Box<dyn Error>),
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TruncatedHash([u8; 16]);
 
 pub struct Reticulum {
     identity_store: Arc<Box<dyn IdentityStore>>,

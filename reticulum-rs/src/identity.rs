@@ -8,13 +8,17 @@ use serde::{de, ser::SerializeStruct, Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256, Sha512};
 use x25519_dalek::PublicKey;
 
-use crate::packet::SignedMessage;
+use crate::{packet::SignedMessage, TruncatedHash};
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, thiserror::Error)]
 pub enum CryptoError {
+    #[error("invalid key")]
     InvalidKey,
+    #[error("encrypt failed")]
     EncryptFailed,
+    #[error("decrypt failed")]
     DecryptFailed,
+    #[error("invalid signature")]
     InvalidSignature,
 }
 
@@ -26,8 +30,8 @@ pub trait IdentityCommon {
         let hash = self.truncated_hash();
         hex::encode(hash)
     }
-    fn handle(&self) -> IdentityHandle {
-        IdentityHandle(self.truncated_hash())
+    fn handle(&self) -> TruncatedHash {
+        TruncatedHash(self.truncated_hash())
     }
 }
 
@@ -220,9 +224,6 @@ impl LocalIdentity for LocalIdentityInner {
         Ok(signature.to_bytes().to_vec())
     }
 }
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct IdentityHandle([u8; 16]);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Identity {

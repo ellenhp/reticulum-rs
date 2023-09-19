@@ -2,7 +2,8 @@ use async_trait::async_trait;
 
 use crate::{
     destination::Destination,
-    identity::{self, Identity, IdentityCommon, IdentityHandle},
+    identity::{self, Identity, IdentityCommon},
+    TruncatedHash,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -27,10 +28,7 @@ pub trait IdentityStore {
         Ok(self_identities)
     }
 
-    fn get_identity_by_handle(
-        &self,
-        handle: &IdentityHandle,
-    ) -> Result<Identity, PersistenceError> {
+    fn get_identity_by_handle(&self, handle: &TruncatedHash) -> Result<Identity, PersistenceError> {
         let all_identities = self.get_all_identities()?;
         for identity in all_identities {
             if &identity.handle() == handle {
@@ -57,7 +55,7 @@ pub trait DestinationStore {
     async fn get_all_destinations(&self) -> Result<Vec<Destination>, PersistenceError>;
     async fn get_destinations_by_identity_handle(
         &self,
-        handle: &IdentityHandle,
+        handle: &TruncatedHash,
     ) -> Result<Vec<Destination>, PersistenceError> {
         let all_destinations = self.get_all_destinations().await?;
         let mut matching_destinations = Vec::new();

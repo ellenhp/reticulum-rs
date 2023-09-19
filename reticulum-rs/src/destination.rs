@@ -3,8 +3,8 @@ use std::time::SystemTime;
 use sha2::{Digest, Sha256};
 
 use crate::{
-    identity::{Identity, IdentityCommon},
-    packet::Packet,
+    identity::{CryptoError, Identity, IdentityCommon},
+    packet::{DestinationType, Packet, PacketError},
 };
 
 #[derive(Debug, PartialEq, thiserror::Error)]
@@ -17,12 +17,6 @@ pub enum DestinationError {
     EmptyAspect,
     #[error("aspect must not contain a dot")]
     DotInAspect,
-}
-
-#[derive(Debug, PartialEq, thiserror::Error)]
-pub enum PacketError {
-    #[error("announce packets can only be constructed for 'single' destinations")]
-    AnnounceDestinationNotSingle,
 }
 
 #[derive(Debug, Clone)]
@@ -66,8 +60,8 @@ impl Destination {
         })
     }
 
-    pub fn builder(app_name: String) -> DestinationBuilder {
-        DestinationBuilder::new(app_name)
+    pub fn builder(app_name: &str) -> DestinationBuilder {
+        DestinationBuilder::new(app_name.to_string())
     }
 
     pub fn app_name(&self) -> &str {
@@ -98,11 +92,13 @@ impl Destination {
     }
 
     /// Returns the truncated hash of this destination according to the Reticulum spec.
-    pub fn truncated_hash(&self) -> Vec<u8> {
+    pub fn truncated_hash(&self) -> [u8; 16] {
         let name = self.full_name();
         let mut hasher = Sha256::new();
         hasher.update(name.as_bytes());
-        hasher.finalize()[..16].to_vec()
+        hasher.finalize()[..16]
+            .try_into()
+            .expect("slice operation must produce 16 bytes")
     }
 
     /// Returns the hex representation of the truncated hash of this destination according to the Reticulum spec.
@@ -110,18 +106,26 @@ impl Destination {
         hex::encode(self.truncated_hash())
     }
 
-    // /// Constructs an announce packet for this destination.
-    // pub fn construct_announce(&mut self) -> Result<Packet, PacketError> {
-    //     let single = match &self.inner {
-    //         DestinationInner::Single(single) => single,
-    //         _ => return Err(PacketError::AnnounceDestinationNotSingle),
-    //     };
-    //     let current_time = SystemTime::now();
-    //     for (tag, response_time, response_data) in &mut self.path_responses {
+    pub fn destination_type(&self) -> DestinationType {
+        match self.inner {
+            DestinationInner::Single(_) => DestinationType::Single,
+            DestinationInner::Group(_) => DestinationType::Group,
+            DestinationInner::Plain(_) => DestinationType::Plain,
+        }
+    }
 
-    //     }
-    //     todo!()
-    // }
+    pub fn encrypt(&self, payload: Vec<u8>) -> Result<Vec<u8>, PacketError> {
+        match &self.inner {
+            DestinationInner::Single(single) => single
+                .identity
+                .encrypt_for(&payload)
+                .map_err(|err| PacketError::CryptoError(err)),
+            DestinationInner::Group(_) => {
+                todo!("implement group destination encryption")
+            }
+            DestinationInner::Plain(_) => Ok(payload),
+        }
+    }
 }
 
 pub struct DestinationBuilder {
@@ -137,16 +141,18 @@ impl DestinationBuilder {
         }
     }
 
-    pub fn aspect(mut self, aspect: String) -> DestinationBuilder {
-        self.aspects.push(aspect);
+    pub fn aspect(mut self, aspect: &str) -> DestinationBuilder {
+        self.aspects.push(aspect.to_string());
         self
     }
 
-    pub fn build_single(self, identity: Identity) -> Result<Destination, DestinationError> {
+    pub fn build_single(self, identity: &Identity) -> Result<Destination, DestinationError> {
         Destination::new(
             self.app_name,
             self.aspects,
-            DestinationInner::Single(SingleDestination { identity }),
+            DestinationInner::Single(SingleDestination {
+                identity: identity.clone(),
+            }),
         )
     }
 
@@ -188,10 +194,10 @@ mod tests {
     fn test_full_name_single() {
         let identity = Identity::new_local();
         let hex_hash = identity.hex_hash();
-        let destination = Destination::builder("app".to_string())
-            .aspect("aspect1".to_string())
-            .aspect("aspect2".to_string())
-            .build_single(identity);
+        let destination = Destination::builder("app")
+            .aspect("aspect1")
+            .aspect("aspect2")
+            .build_single(&identity);
         assert!(destination.is_ok());
         let destination = destination.unwrap();
         assert_eq!(
@@ -202,9 +208,9 @@ mod tests {
 
     #[test]
     fn test_full_name_group() {
-        let destination = Destination::builder("app".to_string())
-            .aspect("aspect1".to_string())
-            .aspect("aspect2".to_string())
+        let destination = Destination::builder("app")
+            .aspect("aspect1")
+            .aspect("aspect2")
             .build_group();
         assert!(destination.is_ok());
         let destination = destination.unwrap();
@@ -213,9 +219,9 @@ mod tests {
 
     #[test]
     fn test_full_name_plain() {
-        let destination = Destination::builder("app".to_string())
-            .aspect("aspect1".to_string())
-            .aspect("aspect2".to_string())
+        let destination = Destination::builder("app")
+            .aspect("aspect1")
+            .aspect("aspect2")
             .build_plain();
         assert!(destination.is_ok());
         let destination = destination.unwrap();
@@ -226,10 +232,10 @@ mod tests {
     fn test_hex_hash_single() {
         let identity = Identity::new_local();
         let hex_hash = identity.hex_hash();
-        let destination = Destination::builder("app".to_string())
-            .aspect("aspect1".to_string())
-            .aspect("aspect2".to_string())
-            .build_single(identity);
+        let destination = Destination::builder("app")
+            .aspect("aspect1")
+            .aspect("aspect2")
+            .build_single(&identity);
         assert!(destination.is_ok());
         let destination = destination.unwrap();
         assert_eq!(
@@ -246,9 +252,9 @@ mod tests {
     #[test]
     fn test_dot_in_app_name() {
         let identity = Identity::new_local();
-        let destination = Destination::builder("app.name".to_string())
-            .aspect("aspect".to_string())
-            .build_single(identity);
+        let destination = Destination::builder("app.name")
+            .aspect("aspect")
+            .build_single(&identity);
         assert!(destination.is_err());
         let err = destination.unwrap_err();
         assert_eq!(err, DestinationError::DotInAppName);
@@ -257,9 +263,9 @@ mod tests {
     #[test]
     fn test_dot_in_aspect() {
         let identity = Identity::new_local();
-        let destination = Destination::builder("app".to_string())
-            .aspect("aspect.name".to_string())
-            .build_single(identity);
+        let destination = Destination::builder("app")
+            .aspect("aspect.name")
+            .build_single(&identity);
         assert!(destination.is_err());
         let err = destination.unwrap_err();
         assert_eq!(err, DestinationError::DotInAspect);
