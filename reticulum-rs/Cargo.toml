@@ -11,6 +11,7 @@ ed25519-dalek = { version = "2.0", features = [ "digest", "rand_core" ] }
 fernet = { version = "0.2", features = ["rustcrypto"], default-features = false }
 hex = "0.4.3"
 hkdf = "0.12.3"
+log = "0.4.20"
 packed_struct = "0.10.1"
 rand = "0.8.5"
 rmp-serde = "1.1.2"

@@ -10,6 +10,7 @@ use std::{
 };
 
 use async_trait::async_trait;
+use log::warn;
 use smol::{channel::Sender, lock::Mutex};
 
 use crate::{
@@ -98,7 +99,7 @@ pub trait DestinationStore: Send + Sync + Sized + 'static {
         let destination_names = if let Ok(names) = self.get_destination_names() {
             names
         } else {
-            println!("error getting destination names");
+            warn!("error getting destination names");
             return None;
         };
         for (app_name, aspects) in destination_names {
@@ -223,7 +224,7 @@ pub trait AnnounceTable {
         let earliest_receipt = if let Some(earliest_receipt) = earliest_receipt {
             earliest_receipt
         } else {
-            println!("no earliest receipt, but have packets, this should be unreachable");
+            warn!("no earliest receipt, but have packets, this should be unreachable");
             return Ok(None);
         };
         let mut best_latency = u64::MAX;

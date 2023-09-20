@@ -5,6 +5,7 @@ use std::{
     thread,
 };
 
+use log::{debug, trace, warn};
 use smol::{
     channel::{Receiver, Sender},
     lock::Mutex,
@@ -99,7 +100,7 @@ impl<DestStore: DestinationStore + 'static, MsgStore: MessageStore + 'static>
             let packet_sender = packet_sender.clone();
             smol::spawn(async move {
                 let interface = interface;
-                println!("Starting interface processing task");
+                trace!("Starting interface processing task");
                 Self::recv_from_interface(interface.clone(), packet_sender.clone()).await
             })
             .detach();
@@ -108,7 +109,7 @@ impl<DestStore: DestinationStore + 'static, MsgStore: MessageStore + 'static>
             let destination_store = destination_store.clone();
             let message_store = message_store.clone();
             let packet_receiver = packet_receiver;
-            println!("Starting packet processing task");
+            trace!("Starting packet processing task");
             Self::process_packets(packet_receiver, destination_store, message_store).await;
         })
         .detach();
@@ -125,23 +126,23 @@ impl<DestStore: DestinationStore + 'static, MsgStore: MessageStore + 'static>
             let message = match future.await {
                 Ok(message) => message,
                 Err(InterfaceError::Recoverable(inner)) => {
-                    println!("Recoverable error: {:?}", inner);
+                    debug!("Recoverable error: {:?}", inner);
                     continue;
                 }
                 Err(inner) => {
-                    println!("Unrecoverable error: {:?}", inner);
+                    warn!("Unrecoverable error: {:?}", inner);
                     break;
                 }
             };
             let packet = match WirePacket::unpack(&message) {
                 Ok(packet) => packet,
                 Err(_) => {
-                    println!("Failed to unpack packet");
+                    debug!("Failed to unpack packet");
                     continue;
                 }
             };
             if let Err(err) = packet_sender.try_send(packet) {
-                println!("Failed to send packet to processing task: {:?}", err);
+                debug!("Failed to send packet to processing task: {:?}", err);
             }
         }
     }
@@ -162,26 +163,25 @@ impl<DestStore: DestinationStore + 'static, MsgStore: MessageStore + 'static>
             crate::packet::Packet::Announce(announce_packet) => {
                 // Add to the identity store and announce table.
                 let identity = announce_packet.identity();
-                println!("Resolving destination");
+                trace!("Resolving destination");
                 let resolved_destination = {
                     let mut destination_store = destination_store.lock().await;
                     let resolved_destination = destination_store
                         .resolve_destination(&announce_packet.destination_name_hash(), identity);
                     resolved_destination.await
                 };
-                println!("Done resolving destination");
                 if let Some(destination) = resolved_destination {
                     let mut destination_store = destination_store.lock().await;
                     match destination_store.add_destination(&destination).await {
                         Ok(a) => {
-                            println!("Added destination to store: {:?}", a);
+                            trace!("Added destination to store");
                         }
                         Err(err) => {
-                            println!("Failed to add destination to store: {:?}", err);
+                            debug!("Failed to add destination to store: {:?}", err);
                         }
                     }
                 } else {
-                    println!("Failed to resolve destination");
+                    trace!("Failed to resolve destination");
                 }
             }
             crate::packet::Packet::Other(_) => todo!(),
@@ -194,38 +194,38 @@ impl<DestStore: DestinationStore + 'static, MsgStore: MessageStore + 'static>
         message_store: Arc<Mutex<Box<MsgStore>>>,
     ) {
         loop {
-            println!("Waiting for packet");
+            trace!("Waiting for packet");
             let packet = packet_receiver.recv();
             let packet = if let Ok(packet) = packet.await {
                 packet
             } else {
-                println!("Failed to receive packet from interface");
+                debug!("Failed to receive packet from interface");
                 continue;
             };
-            println!("Common: {:?}", packet.header().header_common());
+            trace!("Common: {:?}", packet.header().header_common());
             match packet.header().header_variable() {
                 PacketHeaderVariable::LrProof(hash) => {
-                    println!("Received LR proof: {:?}", hash);
+                    trace!("Received LR proof: {:?}", hash);
                 }
                 PacketHeaderVariable::Header1(header1) => {
-                    println!("Received header1: {:?}", header1);
+                    trace!("Received header1: {:?}", header1);
                 }
                 PacketHeaderVariable::Header2(header2) => {
-                    println!("Received header2: {:?}", header2);
+                    trace!("Received header2: {:?}", header2);
                 }
             }
             let semantic_packet = if let Ok(semantic_packet) = packet.into_semantic_packet() {
                 semantic_packet
             } else {
-                println!("Failed to convert packet to semantic packet");
+                debug!("Failed to convert packet to semantic packet");
                 continue;
             };
-            println!("Semantic packet: {:?}", semantic_packet);
+            trace!("Semantic packet: {:?}", semantic_packet);
             Self::maybe_process_announce(&semantic_packet, destination_store.clone()).await;
             if let Some(destination) = semantic_packet.destination(&destination_store).await {
-                println!("Destination: {:?}", destination);
+                trace!("Destination: {:?}", destination);
                 if let Some(Identity::Local(_)) = destination.identity() {
-                    println!("Destination is local");
+                    trace!("Destination is local");
                     if let Some(sender) = message_store
                         .lock()
                         .await
@@ -235,17 +235,17 @@ impl<DestStore: DestinationStore + 'static, MsgStore: MessageStore + 'static>
                         match sender.try_send(semantic_packet) {
                             Ok(_) => {}
                             Err(err) => {
-                                println!("Failed to send packet to inbox: {:?}", err);
+                                debug!("Failed to send packet to inbox: {:?}", err);
                             }
                         }
                     } else {
-                        println!("No sender found for local destination");
+                        debug!("No sender found for local destination");
                     }
                 } else {
-                    println!("Destination is not local");
+                    trace!("Destination is not local");
                 }
             } else {
-                println!("No destination found for packet");
+                trace!("No destination found for packet");
             }
         }
     }

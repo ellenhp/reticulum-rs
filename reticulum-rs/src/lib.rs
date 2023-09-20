@@ -153,8 +153,6 @@ mod test {
             let (destination1, node1) = setup_node(interface1).await;
             let (destination2, node2) = setup_node(interface2).await;
 
-            println!("Running announce");
-
             node1.transport.force_announce_all_local().await.unwrap();
             Timer::after(Duration::from_millis(10)).await;
             assert_eq!(node2.get_known_destinations().await.len(), 2);

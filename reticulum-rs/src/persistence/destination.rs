@@ -1,5 +1,6 @@
 use std::{sync::Arc, time::SystemTime};
 
+use log::debug;
 use sha2::{Digest, Sha256};
 use smol::{
     channel::{Receiver, Sender},
@@ -70,11 +71,11 @@ impl Destination {
             _ => false,
         } {
             if let Err(err) = store.register_local_destination(&dest) {
-                println!("failed to register local destination: {}", err);
+                debug!("failed to register local destination: {}", err);
             }
         } else {
             if let Err(err) = store.add_destination(&dest).await {
-                println!("failed to register non-local destination: {}", err);
+                debug!("failed to register non-local destination: {}", err);
             }
         }
         Ok(dest)

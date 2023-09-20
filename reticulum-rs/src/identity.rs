@@ -89,10 +89,10 @@ impl IdentityCommon for PeerIdentityInner {
         let mut okm = [0u8; 32];
         hkdf.expand(&[], &mut okm).unwrap();
 
-        let base64_key = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(dbg!(okm));
+        let base64_key = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(okm);
         if let Some(fernet_key) = fernet::Fernet::new(&base64_key) {
             let message = fernet_key.encrypt(message);
-            if let Ok(bytes) = base64::engine::general_purpose::URL_SAFE.decode(dbg!(message)) {
+            if let Ok(bytes) = base64::engine::general_purpose::URL_SAFE.decode(message) {
                 let ephemeral_pubkey = ephemeral_pubkey.as_bytes();
                 assert_eq!(ephemeral_pubkey.len(), 32);
                 Ok([ephemeral_pubkey, bytes.as_slice()].concat())
@@ -209,7 +209,7 @@ impl LocalIdentity for LocalIdentityInner {
         let message_pubkey: &[u8; 32] = message_encoded[0..32].try_into().unwrap();
         let message_ciphertext = &message_encoded[32..];
 
-        let other_pubkey = x25519_dalek::PublicKey::from(dbg!(message_pubkey).clone());
+        let other_pubkey = x25519_dalek::PublicKey::from(message_pubkey.clone());
         let shared_secret = self.private_key.diffie_hellman(&other_pubkey);
 
         let salt = self.truncated_hash();
@@ -218,13 +218,11 @@ impl LocalIdentity for LocalIdentityInner {
         let mut okm = [0u8; 32];
         hkdf.expand(&[], &mut okm).unwrap();
 
-        let base64_key = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(dbg!(okm));
+        let base64_key = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(okm);
         let message_ciphertext_base64 =
             base64::engine::general_purpose::URL_SAFE.encode(message_ciphertext);
         if let Some(fernet_key) = fernet::Fernet::new(&base64_key) {
-            let message_cleartext = fernet_key
-                .decrypt(&dbg!(message_ciphertext_base64))
-                .unwrap();
+            let message_cleartext = fernet_key.decrypt(&message_ciphertext_base64).unwrap();
             Ok(message_cleartext)
         } else {
             Err(CryptoError::InvalidKey)
