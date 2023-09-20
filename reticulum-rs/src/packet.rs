@@ -1,14 +1,15 @@
-use std::error::Error;
+use std::{borrow::BorrowMut, error::Error, sync::Arc};
 
 use packed_struct::{
     prelude::{PackedStruct, PrimitiveEnum},
     PackingError,
 };
 use serde::de;
+use smol::lock::Mutex;
 
 use crate::{
-    destination::Destination,
     identity::{CryptoError, Identity, IdentityCommon, LocalIdentity},
+    persistence::{destination::Destination, DestinationStore},
     TruncatedHash,
 };
 
@@ -324,7 +325,6 @@ impl WirePacket {
             }
         }
         packed.extend(self.payload.clone());
-        dbg!(packed.len());
         Ok(packed)
     }
 
@@ -504,11 +504,11 @@ impl AnnouncePacket {
     pub fn identity(&self) -> &Identity {
         &self.identity
     }
-    pub fn destination_name_hash(&self) -> TruncatedHash {
-        self.destination_name_hash
+    pub fn destination_name_hash(&self) -> &TruncatedHash {
+        &self.destination_name_hash
     }
-    pub fn random_hash(&self) -> TruncatedHash {
-        self.random_hash
+    pub fn random_hash(&self) -> &TruncatedHash {
+        &self.random_hash
     }
     pub fn signature(&self) -> &[u8] {
         &self.signature
@@ -524,60 +524,102 @@ pub enum Packet {
     Other(WirePacket),
 }
 
+impl Packet {
+    pub fn wire_packet(&self) -> &WirePacket {
+        match self {
+            Packet::Announce(announce) => announce.wire_packet(),
+            Packet::Other(other) => other,
+        }
+    }
+
+    pub(crate) async fn destination<DestStore: DestinationStore + 'static>(
+        &self,
+        destination_store: &Arc<Mutex<Box<DestStore>>>,
+    ) -> Option<Destination> {
+        match self {
+            Packet::Announce(announce) => {
+                let mut store = destination_store.lock().await;
+                store
+                    .resolve_destination(announce.destination_name_hash(), announce.identity())
+                    .await
+            }
+            Packet::Other(other) => None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod test {
+    use std::{borrow::BorrowMut, sync::Arc};
+
+    use smol::lock::Mutex;
+
     use crate::{
-        destination::{Destination, DestinationBuilder},
         identity::{self, Identity, IdentityCommon, LocalIdentity},
         packet::{
             AnnouncePacket, Packet, PacketContextType, PacketError, PacketType, TransportType,
             WirePacket,
         },
+        persistence::{
+            destination::Destination, in_memory::InMemoryDestinationStore, DestinationStore,
+        },
     };
 
     #[test]
     fn test_packet() {
-        let receiver = Identity::new_local();
-        let destination = Destination::builder("app").build_single(&receiver).unwrap();
-        let packet = WirePacket::new_without_transport(
-            PacketType::Data,
-            PacketContextType::None,
-            TransportType::Transport,
-            &destination,
-            vec![0; 16],
-        )
-        .unwrap();
-        let packed = packet.pack().unwrap();
-        let unpacked = WirePacket::unpack(&packed).unwrap();
-        assert_eq!(packet, unpacked);
-        let decrypted = if let Identity::Local(local) = receiver {
-            local.decrypt(&unpacked.payload).unwrap()
-        } else {
-            panic!("not a local identity");
-        };
-        assert_eq!(vec![0; 16], decrypted);
+        smol::block_on(async move {
+            let store = Arc::new(Mutex::new(Box::new(InMemoryDestinationStore::new())));
+            let receiver = Identity::new_local();
+            let destination = Destination::builder("app")
+                .build_single(&receiver, store.lock().await.as_mut())
+                .await
+                .unwrap();
+            let packet = WirePacket::new_without_transport(
+                PacketType::Data,
+                PacketContextType::None,
+                TransportType::Transport,
+                &destination,
+                vec![0; 16],
+            )
+            .unwrap();
+            let packed = packet.pack().unwrap();
+            let unpacked = WirePacket::unpack(&packed).unwrap();
+            assert_eq!(packet, unpacked);
+            let decrypted = if let Identity::Local(local) = receiver {
+                local.decrypt(&unpacked.payload).unwrap()
+            } else {
+                panic!("not a local identity");
+            };
+            assert_eq!(vec![0; 16], decrypted);
+        });
     }
 
     #[test]
     fn test_create_and_parse_announce_packet() {
-        let identity = Identity::new_local();
-        let destination = Destination::builder("app").build_single(&identity).unwrap();
-        let packet = AnnouncePacket::new(destination.clone(), PacketContextType::None).unwrap();
-        let wire_packet = packet.wire_packet();
-        let packed = wire_packet.pack().unwrap();
-        let unpacked = WirePacket::unpack(&packed).unwrap();
-        assert_eq!(wire_packet, &unpacked);
-        let semantic = unpacked.into_semantic_packet().unwrap();
-        if let Packet::Announce(announce) = semantic {
-            assert_eq!(announce.identity().wire_repr(), identity.wire_repr());
-            assert_eq!(
-                announce.destination_name_hash(),
-                destination.truncated_hash()
-            );
-            assert_eq!(announce.random_hash(), packet.random_hash());
-            assert_eq!(announce.signature(), packet.signature());
-        } else {
-            panic!("not an announce packet");
-        }
+        smol::block_on(async move {
+            let store = Arc::new(Mutex::new(Box::new(InMemoryDestinationStore::new())));
+            let identity = Identity::new_local();
+            let destination = Destination::builder("app")
+                .build_single(&identity, store.lock().await.as_mut())
+                .await
+                .unwrap();
+            let packet = AnnouncePacket::new(destination.clone(), PacketContextType::None).unwrap();
+            let wire_packet = packet.wire_packet();
+            let packed = wire_packet.pack().unwrap();
+            let unpacked = WirePacket::unpack(&packed).unwrap();
+            assert_eq!(wire_packet, &unpacked);
+            let semantic = unpacked.into_semantic_packet().unwrap();
+            if let Packet::Announce(announce) = semantic {
+                assert_eq!(announce.identity().wire_repr(), identity.wire_repr());
+                assert_eq!(
+                    announce.destination_name_hash(),
+                    &destination.truncated_hash()
+                );
+                assert_eq!(announce.random_hash(), packet.random_hash());
+                assert_eq!(announce.signature(), packet.signature());
+            } else {
+                panic!("not an announce packet");
+            }
+        });
     }
 }

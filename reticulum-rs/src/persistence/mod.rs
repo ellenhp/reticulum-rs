@@ -1,6 +1,8 @@
 #[cfg(feature = "stores")]
 pub mod in_memory;
 
+pub mod destination;
+
 use std::{
     rc::Rc,
     sync::Arc,
@@ -8,14 +10,16 @@ use std::{
 };
 
 use async_trait::async_trait;
+use smol::{channel::Sender, lock::Mutex};
 
 use crate::{
-    destination::Destination,
     identity::{self, Identity, IdentityCommon},
     interface::InterfaceHandle,
     packet::{AnnouncePacket, Packet},
     TruncatedHash,
 };
+
+use self::destination::{Destination, DestinationBuilder};
 
 #[derive(Debug, thiserror::Error)]
 pub enum PersistenceError {
@@ -67,7 +71,51 @@ pub trait IdentityStore: Send + Sync {
 }
 
 #[async_trait]
-pub trait DestinationStore: Send + Sync {
+pub trait DestinationStore: Send + Sync + Sized + 'static {
+    fn register_destination_name(
+        &mut self,
+        app_name: String,
+        aspects: Vec<String>,
+    ) -> Result<(), PersistenceError>;
+    fn get_destination_names(&self) -> Result<Vec<(String, Vec<String>)>, PersistenceError>;
+    fn register_local_destination(
+        &mut self,
+        destination: &Destination,
+    ) -> Result<(), PersistenceError>;
+    fn builder(&self, app_name: &str) -> DestinationBuilder {
+        Destination::builder(app_name)
+    }
+    async fn resolve_destination(
+        &mut self,
+        hash: &TruncatedHash,
+        identity: &Identity,
+    ) -> Option<Destination> {
+        let destination_names = if let Ok(names) = self.get_destination_names() {
+            names
+        } else {
+            println!("error getting destination names");
+            return None;
+        };
+        for (app_name, aspects) in destination_names {
+            let mut builder = Destination::builder(app_name.as_str());
+            for aspect in aspects {
+                builder = builder.aspect(aspect.as_str());
+            }
+            let destination = if let Ok(destination) =
+                builder.build_single(identity, self).await.map_err(|err| {
+                    PersistenceError::Unspecified(format!("error building destination: {:?}", err))
+                }) {
+                destination
+            } else {
+                return None;
+            };
+            if destination.truncated_hash() == *hash {
+                self.add_destination(&destination).await.unwrap();
+                return Some(destination);
+            }
+        }
+        None
+    }
     async fn get_all_destinations(&self) -> Result<Vec<Destination>, PersistenceError>;
     async fn get_destinations_by_identity_handle(
         &self,
@@ -122,9 +170,7 @@ pub struct AnnounceTableEntry {
 
 #[async_trait]
 pub trait AnnounceTable {
-    type AnnounceIterator: Iterator<Item = AnnounceTableEntryArc>;
-
-    async fn table_iter(&self) -> Self::AnnounceIterator;
+    async fn table_iter(&self) -> Box<dyn Iterator<Item = AnnounceTableEntryArc>>;
 
     async fn push_announce(
         &mut self,
@@ -186,4 +232,14 @@ pub trait AnnounceTable {
 
         Ok(top_announce)
     }
+}
+
+#[async_trait]
+pub trait MessageStore {
+    fn poll_inbox(&self, destination_hash: &TruncatedHash) -> Option<Packet>;
+    async fn next_inbox(&self, destination_hash: &TruncatedHash) -> Option<Packet>;
+}
+
+pub(super) trait MessageStorePrivate {
+    fn inbox_sender(&self, destination_hash: &TruncatedHash) -> Option<Sender<Packet>>;
 }

@@ -310,6 +310,13 @@ impl Identity {
         };
         Ok(Identity::Peer(peer_identity))
     }
+
+    pub fn is_local(&self) -> bool {
+        match self {
+            Identity::Local(_) => true,
+            _ => false,
+        }
+    }
 }
 
 #[cfg(test)]

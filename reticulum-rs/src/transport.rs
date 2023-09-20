@@ -1,4 +1,9 @@
-use std::{error::Error, sync::Arc, thread};
+use std::{
+    borrow::{Borrow, BorrowMut},
+    error::Error,
+    sync::Arc,
+    thread,
+};
 
 use smol::{
     channel::{Receiver, Sender},
@@ -7,13 +12,13 @@ use smol::{
 };
 
 use crate::{
-    identity::IdentityCommon,
+    identity::{Identity, IdentityCommon},
     interface::{self, Interface, InterfaceError},
     packet::{
-        AnnouncePacket, PacketContextType, PacketHeaderVariable, PacketType, TransportType,
+        AnnouncePacket, Packet, PacketContextType, PacketHeaderVariable, PacketType, TransportType,
         WirePacket,
     },
-    persistence::{DestinationStore, IdentityStore, PersistenceError},
+    persistence::{AnnounceTable, DestinationStore, IdentityStore, MessageStore, PersistenceError},
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -26,59 +31,66 @@ pub enum TransportError {
     Unspecified(Box<dyn Error>),
 }
 
-pub(crate) struct Transport {
+pub(crate) struct Transport<DestStore: DestinationStore, MsgStore: MessageStore> {
     interfaces: Vec<Arc<dyn Interface>>,
-    identity_store: Arc<Box<dyn IdentityStore>>,
-    destination_store: Arc<Box<dyn DestinationStore>>,
+    destination_store: Arc<Mutex<Box<DestStore>>>,
+    message_store: Arc<Mutex<Box<MsgStore>>>,
 }
 
-impl Transport {
+impl<DestStore: DestinationStore + 'static, MsgStore: MessageStore + 'static>
+    Transport<DestStore, MsgStore>
+{
     pub fn new(
         interfaces: Vec<Arc<dyn Interface>>,
-        identity_store: Arc<Box<dyn IdentityStore>>,
-        destination_store: Arc<Box<dyn DestinationStore>>,
-    ) -> Result<Transport, TransportError> {
-        Transport::spawn_processing_tasks(interfaces.clone())?;
+        destination_store: Arc<Mutex<Box<DestStore>>>,
+        message_store: Arc<Mutex<Box<MsgStore>>>,
+    ) -> Result<Transport<DestStore, MsgStore>, TransportError> {
+        Transport::<DestStore, MsgStore>::spawn_processing_tasks(
+            interfaces.clone(),
+            destination_store.clone(),
+        )?;
         Ok(Transport {
-            identity_store,
             destination_store,
+            message_store,
             interfaces,
         })
     }
 
     pub async fn force_announce_all_local(&self) -> Result<(), TransportError> {
-        let self_identities = self
-            .identity_store
-            .get_self_identities()
+        let destinations = self
+            .destination_store
+            .lock()
             .await
-            .map_err(|err| TransportError::Unspecified(Box::new(err)))?;
-        for identity in self_identities {
-            let destinations = self
-                .destination_store
-                .get_destinations_by_identity_handle(&identity.handle())
-                .await
-                .map_err(|err| TransportError::Persistence(err))?;
-            for destination in destinations {
-                // Packet response doesn't make sense here if the intention is to force an announce.
-                let packet = AnnouncePacket::new(destination, PacketContextType::None)
-                    .map_err(|err| TransportError::Unspecified(Box::new(err)))?;
+            .get_all_destinations()
+            .await
+            .map_err(|err| TransportError::Persistence(err))?;
+        for destination in destinations {
+            match destination.identity() {
+                Some(Identity::Local(_)) => {}
+                _ => continue,
+            }
+            // Packet response doesn't make sense here if the intention is to force an announce.
+            let packet = AnnouncePacket::new(destination, PacketContextType::None)
+                .map_err(|err| TransportError::Unspecified(Box::new(err)))?;
 
-                for interface in self.interfaces.clone() {
-                    let interface = interface.clone();
-                    let message = packet
-                        .wire_packet()
-                        .pack()
-                        .map_err(|err| TransportError::Unspecified(Box::new(err)))?;
-                    let interface = interface;
-                    let message = message;
-                    interface.queue_send(&message).await.unwrap();
-                }
+            for interface in self.interfaces.clone() {
+                let interface = interface.clone();
+                let message = packet
+                    .wire_packet()
+                    .pack()
+                    .map_err(|err| TransportError::Unspecified(Box::new(err)))?;
+                let interface = interface;
+                let message = message;
+                interface.queue_send(&message).await.unwrap();
             }
         }
         Ok(())
     }
 
-    fn spawn_processing_tasks(interfaces: Vec<Arc<dyn Interface>>) -> Result<(), TransportError> {
+    fn spawn_processing_tasks(
+        interfaces: Vec<Arc<dyn Interface>>,
+        destination_store: Arc<Mutex<Box<DestStore>>>,
+    ) -> Result<(), TransportError> {
         let (packet_sender, packet_receiver) = smol::channel::bounded(32);
         for interface in interfaces {
             let interface = interface.clone();
@@ -91,9 +103,10 @@ impl Transport {
             .detach();
         }
         smol::spawn(async move {
+            let destination_store = destination_store.clone();
             let packet_receiver = packet_receiver;
             println!("Starting packet processing task");
-            Self::process_packets(packet_receiver).await;
+            Self::process_packets(packet_receiver, destination_store).await;
         })
         .detach();
         Ok(())
@@ -124,8 +137,7 @@ impl Transport {
                     continue;
                 }
             };
-            println!("Received packet: {:?}", packet);
-            if let Err(err) = packet_sender.send(packet).await {
+            if let Err(err) = packet_sender.try_send(packet) {
                 println!("Failed to send packet to processing task: {:?}", err);
             }
         }
@@ -133,14 +145,54 @@ impl Transport {
 
     async fn announce_loop(
         interfaces: Vec<Arc<dyn Interface>>,
-        identity_store: Arc<Box<dyn IdentityStore>>,
-        destination_store: Arc<Box<dyn DestinationStore>>,
+        destination_store: Arc<Mutex<Box<DestStore>>>,
+        announce_table: Arc<Box<dyn AnnounceTable>>,
     ) {
         loop {}
     }
 
-    async fn process_packets(packet_receiver: Receiver<WirePacket>) {
+    async fn maybe_process_announce(
+        semantic_packet: &Packet,
+        destination_store: Arc<Mutex<Box<DestStore>>>,
+    ) {
+        match &semantic_packet {
+            crate::packet::Packet::Announce(announce_packet) => {
+                // Add to the identity store and announce table.
+                let identity = announce_packet.identity();
+                println!("Announce packet identity: {:?}", identity);
+                let destination_store_clone = destination_store.clone();
+                println!("Resolving destination");
+                let resolved_destination = {
+                    let mut destination_store = destination_store.lock().await;
+                    let resolved_destination = destination_store
+                        .resolve_destination(&announce_packet.destination_name_hash(), identity);
+                    resolved_destination.await
+                };
+                println!("Done resolving destination");
+                if let Some(destination) = resolved_destination {
+                    let mut destination_store = destination_store.lock().await;
+                    match destination_store.add_destination(&destination).await {
+                        Ok(a) => {
+                            println!("Added destination to store: {:?}", a);
+                        }
+                        Err(err) => {
+                            println!("Failed to add destination to store: {:?}", err);
+                        }
+                    }
+                } else {
+                    println!("Failed to resolve destination");
+                }
+            }
+            crate::packet::Packet::Other(_) => todo!(),
+        }
+    }
+
+    async fn process_packets(
+        packet_receiver: Receiver<WirePacket>,
+        destination_store: Arc<Mutex<Box<DestStore>>>,
+    ) {
         loop {
+            println!("Waiting for packet");
             let packet = packet_receiver.recv();
             let packet = if let Ok(packet) = packet.await {
                 packet
@@ -159,6 +211,22 @@ impl Transport {
                 PacketHeaderVariable::Header2(header2) => {
                     println!("Received header2: {:?}", header2);
                 }
+            }
+            let semantic_packet = if let Ok(semantic_packet) = packet.into_semantic_packet() {
+                semantic_packet
+            } else {
+                println!("Failed to convert packet to semantic packet");
+                continue;
+            };
+            println!("Semantic packet: {:?}", semantic_packet);
+            Self::maybe_process_announce(&semantic_packet, destination_store.clone()).await;
+            if let Some(destination) = semantic_packet.destination(&destination_store).await {
+                println!("Destination: {:?}", destination);
+                if let Some(Identity::Local(_)) = destination.identity() {
+                    println!("Destination is local");
+                }
+            } else {
+                println!("No destination found for packet");
             }
         }
     }

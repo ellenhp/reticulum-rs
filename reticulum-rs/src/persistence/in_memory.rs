@@ -1,17 +1,21 @@
 use std::{collections::HashMap, rc::Rc, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
-use smol::lock::Mutex;
+use smol::{
+    channel::{Receiver, Sender},
+    lock::Mutex,
+};
 
 use crate::{
-    destination::Destination,
     identity::{Identity, IdentityCommon},
+    packet::Packet,
     TruncatedHash,
 };
 
 use super::{
-    AnnounceTable, AnnounceTableEntry, AnnounceTableEntryArc, DestinationStore, IdentityMetadata,
-    IdentityStore, PersistenceError,
+    destination::Destination, AnnounceTable, AnnounceTableEntry, AnnounceTableEntryArc,
+    DestinationStore, IdentityMetadata, IdentityStore, MessageStore, MessageStorePrivate,
+    PersistenceError,
 };
 
 pub struct InMemoryIdentityStore {
@@ -69,12 +73,14 @@ impl IdentityStore for InMemoryIdentityStore {
 }
 
 pub struct InMemoryDestinationStore {
+    destination_names: Vec<(String, Vec<String>)>,
     destinations: HashMap<String, Destination>,
 }
 
 impl InMemoryDestinationStore {
     pub fn new() -> InMemoryDestinationStore {
         InMemoryDestinationStore {
+            destination_names: Vec::new(),
             destinations: HashMap::new(),
         }
     }
@@ -82,6 +88,28 @@ impl InMemoryDestinationStore {
 
 #[async_trait]
 impl DestinationStore for InMemoryDestinationStore {
+    fn register_destination_name(
+        &mut self,
+        app_name: String,
+        aspects: Vec<String>,
+    ) -> Result<(), PersistenceError> {
+        self.destination_names.push((app_name, aspects));
+        Ok(())
+    }
+
+    fn register_local_destination(
+        &mut self,
+        destination: &Destination,
+    ) -> Result<(), PersistenceError> {
+        self.destinations
+            .insert(destination.full_name(), destination.clone());
+        Ok(())
+    }
+
+    fn get_destination_names(&self) -> Result<Vec<(String, Vec<String>)>, PersistenceError> {
+        Ok(self.destination_names.clone())
+    }
+
     async fn get_all_destinations(&self) -> Result<Vec<Destination>, PersistenceError> {
         let mut all_destinations = Vec::new();
         for destination in self.destinations.values() {
@@ -106,8 +134,10 @@ impl DestinationStore for InMemoryDestinationStore {
     }
 
     async fn add_destination(&mut self, destination: &Destination) -> Result<(), PersistenceError> {
-        self.destinations
-            .insert(destination.full_name(), destination.clone());
+        if !self.destinations.contains_key(&destination.full_name()) {
+            self.destinations
+                .insert(destination.full_name(), destination.clone());
+        }
         Ok(())
     }
 
@@ -143,14 +173,12 @@ impl Iterator for InMemoryAnnounceIterator {
 
 #[async_trait]
 impl AnnounceTable for InMemoryAnnounceTable {
-    type AnnounceIterator = InMemoryAnnounceIterator;
-
-    async fn table_iter(&self) -> Self::AnnounceIterator {
+    async fn table_iter(&self) -> Box<dyn Iterator<Item = AnnounceTableEntryArc>> {
         let announces = self.announces.lock();
         let announces = announces.await;
-        InMemoryAnnounceIterator {
+        Box::new(InMemoryAnnounceIterator {
             announces: announces.clone(),
-        }
+        })
     }
 
     async fn push_announce(
@@ -174,5 +202,45 @@ impl AnnounceTable for InMemoryAnnounceTable {
         }
         *announces = new_announces;
         Ok(())
+    }
+}
+
+pub struct InMemoryMessageStore {
+    messages: HashMap<TruncatedHash, (Sender<Packet>, Receiver<Packet>)>,
+}
+
+#[async_trait]
+impl MessageStore for InMemoryMessageStore {
+    fn poll_inbox(&self, destination_hash: &TruncatedHash) -> Option<Packet> {
+        let (sender, receiver) = self.messages.get(&destination_hash)?;
+        match receiver.try_recv() {
+            Ok(packet) => Some(packet),
+            // TODO: Do these errors mean we need to do something?
+            Err(_) => None,
+        }
+    }
+
+    async fn next_inbox(&self, destination_hash: &TruncatedHash) -> Option<Packet> {
+        let (sender, receiver) = self.messages.get(&destination_hash)?;
+        match receiver.recv().await {
+            Ok(packet) => Some(packet),
+            // TODO: Do these errors mean we need to do something?
+            Err(_) => None,
+        }
+    }
+}
+
+impl MessageStorePrivate for InMemoryMessageStore {
+    fn inbox_sender(&self, destination_hash: &TruncatedHash) -> Option<Sender<Packet>> {
+        let (sender, _receiver) = self.messages.get(&destination_hash)?;
+        Some(sender.clone())
+    }
+}
+
+impl InMemoryMessageStore {
+    pub fn new() -> InMemoryMessageStore {
+        InMemoryMessageStore {
+            messages: HashMap::new(),
+        }
     }
 }

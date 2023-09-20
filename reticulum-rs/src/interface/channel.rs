@@ -10,23 +10,25 @@ use super::{Interface, InterfaceError};
 
 #[derive(Debug)]
 pub struct ChannelInterface {
-    sender: Sender<Vec<u8>>,
-    receiver: Arc<Mutex<Receiver<Vec<u8>>>>,
+    senders: Arc<Mutex<Vec<Sender<Vec<u8>>>>>,
+    receiver: Receiver<Vec<u8>>,
 }
 
 impl ChannelInterface {
     pub fn new() -> Self {
         let (sender, receiver) = channel::bounded(100);
         Self {
-            sender,
-            receiver: Arc::new(Mutex::new(receiver)),
+            senders: Arc::new(Mutex::new(vec![sender])),
+            receiver,
         }
     }
 
     pub async fn clone(&self) -> Self {
+        let (sender, receiver) = channel::bounded(100);
+        self.senders.lock().await.push(sender);
         Self {
-            sender: self.sender.clone(),
-            receiver: Arc::new(Mutex::new(self.receiver.lock().await.clone())),
+            senders: self.senders.clone(),
+            receiver,
         }
     }
 }
@@ -34,17 +36,21 @@ impl ChannelInterface {
 #[async_trait]
 impl Interface for ChannelInterface {
     async fn queue_send(&self, message: &[u8]) -> Result<(), InterfaceError> {
-        println!("queue_send: {:?}", message);
-        self.sender.send(message.to_vec()).await.map_err(|err| {
-            InterfaceError::Unspecified(format!("failed to queue message for sending: {:?}", err))
-        })?;
+        let senders = self.senders.lock().await;
+        for sender in senders.iter() {
+            let _ = sender.send(message.to_vec()).await.map_err(|err| {
+                InterfaceError::Unspecified(format!(
+                    "failed to queue message for sending: {:?}",
+                    err
+                ))
+            });
+        }
         Ok(())
     }
 
     async fn recv(&self) -> Result<Vec<u8>, InterfaceError> {
-        let recv = self.receiver.lock().await;
-        dbg!(recv.recv().await.map_err(|err| {
+        self.receiver.recv().await.map_err(|err| {
             InterfaceError::Unspecified(format!("failed to receive message: {:?}", err))
-        }))
+        })
     }
 }
