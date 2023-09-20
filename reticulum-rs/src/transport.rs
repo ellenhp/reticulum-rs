@@ -48,6 +48,7 @@ impl<DestStore: DestinationStore + 'static, MsgStore: MessageStore + 'static>
         Transport::<DestStore, MsgStore>::spawn_processing_tasks(
             interfaces.clone(),
             destination_store.clone(),
+            message_store.clone(),
         )?;
         Ok(Transport {
             destination_store,
@@ -90,6 +91,7 @@ impl<DestStore: DestinationStore + 'static, MsgStore: MessageStore + 'static>
     fn spawn_processing_tasks(
         interfaces: Vec<Arc<dyn Interface>>,
         destination_store: Arc<Mutex<Box<DestStore>>>,
+        message_store: Arc<Mutex<Box<MsgStore>>>,
     ) -> Result<(), TransportError> {
         let (packet_sender, packet_receiver) = smol::channel::bounded(32);
         for interface in interfaces {
@@ -104,9 +106,10 @@ impl<DestStore: DestinationStore + 'static, MsgStore: MessageStore + 'static>
         }
         smol::spawn(async move {
             let destination_store = destination_store.clone();
+            let message_store = message_store.clone();
             let packet_receiver = packet_receiver;
             println!("Starting packet processing task");
-            Self::process_packets(packet_receiver, destination_store).await;
+            Self::process_packets(packet_receiver, destination_store, message_store).await;
         })
         .detach();
         Ok(())
@@ -159,8 +162,6 @@ impl<DestStore: DestinationStore + 'static, MsgStore: MessageStore + 'static>
             crate::packet::Packet::Announce(announce_packet) => {
                 // Add to the identity store and announce table.
                 let identity = announce_packet.identity();
-                println!("Announce packet identity: {:?}", identity);
-                let destination_store_clone = destination_store.clone();
                 println!("Resolving destination");
                 let resolved_destination = {
                     let mut destination_store = destination_store.lock().await;
@@ -190,6 +191,7 @@ impl<DestStore: DestinationStore + 'static, MsgStore: MessageStore + 'static>
     async fn process_packets(
         packet_receiver: Receiver<WirePacket>,
         destination_store: Arc<Mutex<Box<DestStore>>>,
+        message_store: Arc<Mutex<Box<MsgStore>>>,
     ) {
         loop {
             println!("Waiting for packet");
@@ -224,6 +226,23 @@ impl<DestStore: DestinationStore + 'static, MsgStore: MessageStore + 'static>
                 println!("Destination: {:?}", destination);
                 if let Some(Identity::Local(_)) = destination.identity() {
                     println!("Destination is local");
+                    if let Some(sender) = message_store
+                        .lock()
+                        .await
+                        .as_mut()
+                        .sender(&destination.truncated_hash())
+                    {
+                        match sender.try_send(semantic_packet) {
+                            Ok(_) => {}
+                            Err(err) => {
+                                println!("Failed to send packet to inbox: {:?}", err);
+                            }
+                        }
+                    } else {
+                        println!("No sender found for local destination");
+                    }
+                } else {
+                    println!("Destination is not local");
                 }
             } else {
                 println!("No destination found for packet");

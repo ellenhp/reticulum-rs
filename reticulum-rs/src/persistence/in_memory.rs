@@ -14,8 +14,7 @@ use crate::{
 
 use super::{
     destination::Destination, AnnounceTable, AnnounceTableEntry, AnnounceTableEntryArc,
-    DestinationStore, IdentityMetadata, IdentityStore, MessageStore, MessageStorePrivate,
-    PersistenceError,
+    DestinationStore, IdentityMetadata, IdentityStore, MessageStore, PersistenceError,
 };
 
 pub struct InMemoryIdentityStore {
@@ -228,10 +227,8 @@ impl MessageStore for InMemoryMessageStore {
             Err(_) => None,
         }
     }
-}
 
-impl MessageStorePrivate for InMemoryMessageStore {
-    fn inbox_sender(&self, destination_hash: &TruncatedHash) -> Option<Sender<Packet>> {
+    fn sender(&self, destination_hash: &TruncatedHash) -> Option<Sender<Packet>> {
         let (sender, _receiver) = self.messages.get(&destination_hash)?;
         Some(sender.clone())
     }

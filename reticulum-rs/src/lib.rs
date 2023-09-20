@@ -158,6 +158,10 @@ mod test {
             node1.transport.force_announce_all_local().await.unwrap();
             Timer::after(Duration::from_millis(10)).await;
             assert_eq!(node2.get_known_destinations().await.len(), 2);
+            assert!(node1
+                .poll_inbox(&destination1.truncated_hash())
+                .await
+                .is_some());
         });
     }
 }

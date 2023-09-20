@@ -90,6 +90,11 @@ pub trait DestinationStore: Send + Sync + Sized + 'static {
         hash: &TruncatedHash,
         identity: &Identity,
     ) -> Option<Destination> {
+        if let Ok(Some(destination)) = self.get_destination(hash).await {
+            if destination.truncated_hash() == *hash {
+                return Some(destination);
+            }
+        }
         let destination_names = if let Ok(names) = self.get_destination_names() {
             names
         } else {
@@ -147,6 +152,18 @@ pub trait DestinationStore: Send + Sync + Sized + 'static {
     }
 
     async fn add_destination(&mut self, destination: &Destination) -> Result<(), PersistenceError>;
+    async fn get_destination(
+        &self,
+        hash: &TruncatedHash,
+    ) -> Result<Option<Destination>, PersistenceError> {
+        let all_destinations = self.get_all_destinations().await?;
+        for existing_destination in all_destinations {
+            if &existing_destination.truncated_hash() == hash {
+                return Ok(Some(existing_destination));
+            }
+        }
+        Ok(None)
+    }
     async fn remove_destination(
         &mut self,
         destination: &Destination,
@@ -235,11 +252,8 @@ pub trait AnnounceTable {
 }
 
 #[async_trait]
-pub trait MessageStore {
+pub trait MessageStore: Send + Sync + Sized + 'static {
     fn poll_inbox(&self, destination_hash: &TruncatedHash) -> Option<Packet>;
     async fn next_inbox(&self, destination_hash: &TruncatedHash) -> Option<Packet>;
-}
-
-pub(super) trait MessageStorePrivate {
-    fn inbox_sender(&self, destination_hash: &TruncatedHash) -> Option<Sender<Packet>>;
+    fn sender(&self, destination_hash: &TruncatedHash) -> Option<Sender<Packet>>;
 }
