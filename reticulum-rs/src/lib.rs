@@ -34,6 +34,9 @@ pub enum ReticulumError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TruncatedHash([u8; 16]);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct NameHash([u8; 10]);
+
 pub struct Reticulum<DestStore: DestinationStore + 'static, MsgStore: MessageStore + 'static> {
     destination_store: Arc<Mutex<Box<DestStore>>>,
     message_store: Arc<Mutex<Box<MsgStore>>>,
@@ -81,6 +84,34 @@ impl<DestStore: DestinationStore, MsgStore: MessageStore> Reticulum<DestStore, M
             }
         }
         local_destinations
+    }
+
+    pub async fn get_peer_destinations(&self) -> Result<Vec<Destination>, PersistenceError> {
+        let all_destinations = self
+            .destination_store
+            .lock()
+            .await
+            .get_all_destinations()
+            .await
+            .unwrap();
+        let mut peer_destinations = Vec::new();
+        for destination in all_destinations {
+            if let Some(Identity::Peer(_)) = destination.identity() {
+                peer_destinations.push(destination);
+            }
+        }
+        Ok(peer_destinations)
+    }
+
+    pub async fn register_destination_prefix(
+        &self,
+        app_name: String,
+        aspects: Vec<String>,
+    ) -> Result<(), PersistenceError> {
+        self.destination_store
+            .lock()
+            .await
+            .register_destination_name(app_name, aspects)
     }
 
     pub async fn poll_inbox(&self, destination: &TruncatedHash) -> Option<Packet> {

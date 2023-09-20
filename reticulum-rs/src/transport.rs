@@ -72,7 +72,7 @@ impl<DestStore: DestinationStore + 'static, MsgStore: MessageStore + 'static>
                 _ => continue,
             }
             // Packet response doesn't make sense here if the intention is to force an announce.
-            let packet = AnnouncePacket::new(destination, PacketContextType::None)
+            let packet = AnnouncePacket::new(destination, PacketContextType::None, vec![])
                 .map_err(|err| TransportError::Unspecified(Box::new(err)))?;
 
             for interface in self.interfaces.clone() {
@@ -214,11 +214,15 @@ impl<DestStore: DestinationStore + 'static, MsgStore: MessageStore + 'static>
                     trace!("Received header2: {:?}", header2);
                 }
             }
-            let semantic_packet = if let Ok(semantic_packet) = packet.into_semantic_packet() {
-                semantic_packet
-            } else {
-                debug!("Failed to convert packet to semantic packet");
-                continue;
+            let semantic_packet = match packet.into_semantic_packet() {
+                Ok(semantic_packet) => {
+                    trace!("Converted packet to semantic packet");
+                    semantic_packet
+                }
+                Err(err) => {
+                    debug!("Failed to convert packet to semantic packet: {:?}", err);
+                    continue;
+                }
             };
             trace!("Semantic packet: {:?}", semantic_packet);
             Self::maybe_process_announce(&semantic_packet, destination_store.clone()).await;

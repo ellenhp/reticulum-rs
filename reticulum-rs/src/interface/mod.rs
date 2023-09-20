@@ -1,5 +1,7 @@
 #[cfg(feature = "interfaces")]
 pub mod channel;
+#[cfg(feature = "interfaces")]
+pub mod udp;
 
 use std::{error::Error, fmt::Debug, sync::Arc};
 

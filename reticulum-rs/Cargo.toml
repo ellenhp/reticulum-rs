@@ -3,11 +3,16 @@ name = "reticulum-rs"
 version = "0.1.0"
 edition = "2021"
 
+[[bin]]
+name = "integration_tests"
+path = "bin/integration_tests.rs"
+
 [dependencies]
 anyhow = "1.0"
 async-trait = "0.1.73"
 base64 = "0.21.4"
 ed25519-dalek = { version = "2.0", features = [ "digest", "rand_core" ] }
+env_logger = "0.10.0"
 fernet = { version = "0.2", features = ["rustcrypto"], default-features = false }
 hex = "0.4.3"
 hkdf = "0.12.3"

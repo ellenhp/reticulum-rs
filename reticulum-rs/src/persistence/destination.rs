@@ -11,7 +11,7 @@ use crate::{
     identity::{CryptoError, Identity, IdentityCommon},
     packet::{DestinationType, Packet, PacketError, WirePacket},
     persistence::DestinationStore,
-    TruncatedHash,
+    NameHash, TruncatedHash,
 };
 
 #[derive(Debug, PartialEq, thiserror::Error)]
@@ -119,6 +119,18 @@ impl Destination {
         hasher.update(name.as_bytes());
         TruncatedHash(
             hasher.finalize()[..16]
+                .try_into()
+                .expect("slice operation must produce 16 bytes"),
+        )
+    }
+
+    /// Returns the name hash of this destination according to the Reticulum spec.
+    pub fn name_hash(&self) -> NameHash {
+        let name = self.full_name();
+        let mut hasher = Sha256::new();
+        hasher.update(name.as_bytes());
+        NameHash(
+            hasher.finalize()[..10]
                 .try_into()
                 .expect("slice operation must produce 16 bytes"),
         )

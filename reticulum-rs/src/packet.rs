@@ -10,7 +10,7 @@ use smol::lock::Mutex;
 use crate::{
     identity::{CryptoError, Identity, IdentityCommon, LocalIdentity},
     persistence::{destination::Destination, DestinationStore},
-    TruncatedHash,
+    NameHash, TruncatedHash,
 };
 
 pub trait SignedMessage {
@@ -368,31 +368,38 @@ impl WirePacket {
 
     pub fn into_semantic_packet(self) -> Result<Packet, PacketError> {
         if self.header.header_common.packet_type == PacketType::Announce {
-            if self.payload.len() != 64 + 16 + 16 + 64 {
-                return Err(PacketError::Unknown(
-                    "Announce packet incorrect length".to_string(),
-                ));
+            let expected_size: usize = 64 // Public keys
+                                        + 10 // Destination name hash
+                                        + 10 // Random hash
+                                        + 64; // Signature
+            if self.payload.len() < expected_size {
+                return Err(PacketError::Unknown(format!(
+                    "Announce packet incorrect length: {}",
+                    self.payload.len()
+                )));
             }
             let identity = Identity::from_wire_repr(&self.payload[0..64])
                 .map_err(|err| PacketError::CryptoError(err))?;
-            let destination_name_hash = TruncatedHash(
-                self.payload[64..80]
+            let destination_name_hash = NameHash(
+                self.payload[64..74]
                     .try_into()
                     .map_err(|_err| PacketError::Unknown("Try from slice failed".to_string()))?,
             );
-            let random_hash = TruncatedHash(
-                self.payload[80..96]
+            let random_hash = NameHash(
+                self.payload[74..84]
                     .try_into()
                     .map_err(|_err| PacketError::Unknown("Try from slice failed".to_string()))?,
             );
-            let signature = self.payload[96..160]
+            let signature = self.payload[84..148]
                 .try_into()
                 .map_err(|_err| PacketError::Unknown("Try from slice failed".to_string()))?;
+            let app_data = self.payload[148..].to_vec();
             return Ok(Packet::Announce(AnnouncePacket {
                 identity,
                 destination_name_hash,
                 random_hash,
                 signature,
+                app_data,
                 wire_packet: self,
             }));
         }
@@ -447,9 +454,10 @@ impl WirePacket {
 #[derive(Debug, Clone)]
 pub struct AnnouncePacket {
     identity: Identity,
-    destination_name_hash: TruncatedHash,
-    random_hash: TruncatedHash,
+    destination_name_hash: NameHash,
+    random_hash: NameHash,
     signature: [u8; 64],
+    app_data: Vec<u8>,
     wire_packet: WirePacket,
 }
 
@@ -457,6 +465,7 @@ impl AnnouncePacket {
     pub fn new(
         destination: Destination,
         path_context: PacketContextType,
+        app_data: Vec<u8>,
     ) -> Result<AnnouncePacket, PacketError> {
         if path_context != PacketContextType::None
             && path_context != PacketContextType::PathResponse
@@ -468,22 +477,23 @@ impl AnnouncePacket {
         let identity = destination
             .identity()
             .ok_or(PacketError::AnnounceDestinationNotSingle)?;
-        let destination_name_hash = destination.truncated_hash();
-        let random_hash = TruncatedHash(rand::random());
-        let mut payload = [0u8; 160];
+        let destination_name_hash = destination.name_hash();
+        let random_hash = NameHash(rand::random()); // TODO: Include time? That's what the reference implementation does.
+        let mut payload = vec![0u8; 154];
         payload[0..64].copy_from_slice(&identity.wire_repr());
         payload[64..80].copy_from_slice(&destination_name_hash.0);
-        payload[80..96].copy_from_slice(&random_hash.0);
+        payload[80..90].copy_from_slice(&random_hash.0);
         if let Identity::Local(local) = identity {
             let signature = local
                 .sign(&payload[0..96])
                 .map_err(|err| PacketError::CryptoError(err))?;
-            payload[96..160].copy_from_slice(&signature);
+            payload[90..154].copy_from_slice(&signature);
         } else {
             return Err(PacketError::Unknown(
                 "Announce packet identity not local".to_string(),
             ));
         }
+        payload.extend(&app_data);
         let wire_packet = WirePacket::new_without_transport(
             PacketType::Announce,
             path_context,
@@ -495,19 +505,20 @@ impl AnnouncePacket {
             identity: identity.clone(),
             destination_name_hash: destination_name_hash,
             random_hash,
-            signature: payload[96..160]
+            signature: payload[90..154]
                 .try_into()
                 .map_err(|_err| PacketError::Unknown("Try from slice failed".to_string()))?,
+            app_data,
             wire_packet,
         })
     }
     pub fn identity(&self) -> &Identity {
         &self.identity
     }
-    pub fn destination_name_hash(&self) -> &TruncatedHash {
+    pub fn destination_name_hash(&self) -> &NameHash {
         &self.destination_name_hash
     }
-    pub fn random_hash(&self) -> &TruncatedHash {
+    pub fn random_hash(&self) -> &NameHash {
         &self.random_hash
     }
     pub fn signature(&self) -> &[u8] {
@@ -603,7 +614,8 @@ mod test {
                 .build_single(&identity, store.lock().await.as_mut())
                 .await
                 .unwrap();
-            let packet = AnnouncePacket::new(destination.clone(), PacketContextType::None).unwrap();
+            let packet =
+                AnnouncePacket::new(destination.clone(), PacketContextType::None, vec![]).unwrap();
             let wire_packet = packet.wire_packet();
             let packed = wire_packet.pack().unwrap();
             let unpacked = WirePacket::unpack(&packed).unwrap();
@@ -611,10 +623,7 @@ mod test {
             let semantic = unpacked.into_semantic_packet().unwrap();
             if let Packet::Announce(announce) = semantic {
                 assert_eq!(announce.identity().wire_repr(), identity.wire_repr());
-                assert_eq!(
-                    announce.destination_name_hash(),
-                    &destination.truncated_hash()
-                );
+                assert_eq!(announce.destination_name_hash(), &destination.name_hash());
                 assert_eq!(announce.random_hash(), packet.random_hash());
                 assert_eq!(announce.signature(), packet.signature());
             } else {

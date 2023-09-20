@@ -17,7 +17,7 @@ use crate::{
     identity::{self, Identity, IdentityCommon},
     interface::InterfaceHandle,
     packet::{AnnouncePacket, Packet},
-    TruncatedHash,
+    NameHash, TruncatedHash,
 };
 
 use self::destination::{Destination, DestinationBuilder};
@@ -83,16 +83,36 @@ pub trait DestinationStore: Send + Sync + Sized + 'static {
         &mut self,
         destination: &Destination,
     ) -> Result<(), PersistenceError>;
+    async fn get_local_destinations(&self) -> Result<Vec<Destination>, PersistenceError> {
+        let all_destinations = self.get_all_destinations().await?;
+        let mut local_destinations = Vec::new();
+        for destination in all_destinations {
+            if let Some(Identity::Local(_)) = destination.identity() {
+                local_destinations.push(destination);
+            }
+        }
+        Ok(local_destinations)
+    }
+    async fn get_peer_destinations(&self) -> Result<Vec<Destination>, PersistenceError> {
+        let all_destinations = self.get_all_destinations().await?;
+        let mut peer_destinations = Vec::new();
+        for destination in all_destinations {
+            if let Some(Identity::Peer(_)) = destination.identity() {
+                peer_destinations.push(destination);
+            }
+        }
+        Ok(peer_destinations)
+    }
     fn builder(&self, app_name: &str) -> DestinationBuilder {
         Destination::builder(app_name)
     }
     async fn resolve_destination(
         &mut self,
-        hash: &TruncatedHash,
+        hash: &NameHash,
         identity: &Identity,
     ) -> Option<Destination> {
         if let Ok(Some(destination)) = self.get_destination(hash).await {
-            if destination.truncated_hash() == *hash {
+            if destination.name_hash() == *hash {
                 return Some(destination);
             }
         }
@@ -113,9 +133,10 @@ pub trait DestinationStore: Send + Sync + Sized + 'static {
                 }) {
                 destination
             } else {
+                warn!("error building destination");
                 return None;
             };
-            if destination.truncated_hash() == *hash {
+            if destination.name_hash() == *hash {
                 self.add_destination(&destination).await.unwrap();
                 return Some(destination);
             }
@@ -155,11 +176,11 @@ pub trait DestinationStore: Send + Sync + Sized + 'static {
     async fn add_destination(&mut self, destination: &Destination) -> Result<(), PersistenceError>;
     async fn get_destination(
         &self,
-        hash: &TruncatedHash,
+        hash: &NameHash,
     ) -> Result<Option<Destination>, PersistenceError> {
         let all_destinations = self.get_all_destinations().await?;
         for existing_destination in all_destinations {
-            if &existing_destination.truncated_hash() == hash {
+            if &existing_destination.name_hash() == hash {
                 return Ok(Some(existing_destination));
             }
         }
@@ -205,7 +226,7 @@ pub trait AnnounceTable {
         let mut matching_announces = Vec::new();
         let mut earliest_receipt = None;
         for announce in all_announces {
-            if announce.destination.truncated_hash() == destination.truncated_hash() {
+            if announce.destination.name_hash() == destination.name_hash() {
                 earliest_receipt = if let Some(receipt) = earliest_receipt {
                     if announce.received_time < receipt {
                         Some(announce.received_time)
