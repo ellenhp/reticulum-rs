@@ -151,7 +151,7 @@ mod test {
             let interface1 = ChannelInterface::new();
             let interface2 = interface1.clone().await;
             let (destination1, node1) = setup_node(interface1).await;
-            let (_destination2, node2) = setup_node(interface2).await;
+            let (destination2, node2) = setup_node(interface2).await;
 
             println!("Running announce");
 
@@ -162,6 +162,18 @@ mod test {
                 .poll_inbox(&destination1.truncated_hash())
                 .await
                 .is_some());
+            assert!(node1
+                .poll_inbox(&destination2.truncated_hash())
+                .await
+                .is_none());
+            assert!(node2
+                .poll_inbox(&destination1.truncated_hash())
+                .await
+                .is_none());
+            assert!(node2
+                .poll_inbox(&destination2.truncated_hash())
+                .await
+                .is_none());
         });
     }
 }

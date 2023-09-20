@@ -228,9 +228,15 @@ impl MessageStore for InMemoryMessageStore {
         }
     }
 
-    fn sender(&self, destination_hash: &TruncatedHash) -> Option<Sender<Packet>> {
-        let (sender, _receiver) = self.messages.get(&destination_hash)?;
-        Some(sender.clone())
+    fn sender(&mut self, destination_hash: &TruncatedHash) -> Option<Sender<Packet>> {
+        if let Some((sender, _receiver)) = self.messages.get(&destination_hash) {
+            Some(sender.clone())
+        } else {
+            let (sender, receiver) = smol::channel::bounded(16);
+            self.messages
+                .insert(destination_hash.clone(), (sender.clone(), receiver));
+            Some(sender)
+        }
     }
 }
 

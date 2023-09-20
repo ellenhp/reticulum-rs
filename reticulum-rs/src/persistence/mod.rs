@@ -255,5 +255,5 @@ pub trait AnnounceTable {
 pub trait MessageStore: Send + Sync + Sized + 'static {
     fn poll_inbox(&self, destination_hash: &TruncatedHash) -> Option<Packet>;
     async fn next_inbox(&self, destination_hash: &TruncatedHash) -> Option<Packet>;
-    fn sender(&self, destination_hash: &TruncatedHash) -> Option<Sender<Packet>>;
+    fn sender(&mut self, destination_hash: &TruncatedHash) -> Option<Sender<Packet>>;
 }
