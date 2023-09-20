@@ -14,11 +14,12 @@ pub struct UdpInterface {
 #[async_trait]
 impl Interface for UdpInterface {
     async fn queue_send(&self, message: &[u8]) -> Result<(), InterfaceError> {
-        self.socket
+        dbg!(self
+            .socket
             .send_to(message, self.destination)
             .await
             .map_err(|err| InterfaceError::Recoverable(Box::new(err)))
-            .map(|_| ())
+            .map(|_| ()))
     }
 
     async fn recv(&self) -> Result<Vec<u8>, InterfaceError> {

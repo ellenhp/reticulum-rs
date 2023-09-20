@@ -234,7 +234,7 @@ impl<DestStore: DestinationStore + 'static, MsgStore: MessageStore + 'static>
                         .lock()
                         .await
                         .as_mut()
-                        .sender(&destination.truncated_hash())
+                        .sender(&destination.address_hash())
                     {
                         match sender.try_send(semantic_packet) {
                             Ok(_) => {}

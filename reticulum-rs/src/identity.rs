@@ -5,7 +5,7 @@ use ed25519_dalek::{DigestSigner, Signer, Verifier};
 use hkdf::Hkdf;
 use rand::rngs::OsRng;
 use serde::{de, ser::SerializeStruct, Deserialize, Deserializer, Serialize};
-use sha2::{Digest, Sha256, Sha512};
+use sha2::{Digest, Sha256};
 use x25519_dalek::PublicKey;
 
 use crate::{packet::SignedMessage, TruncatedHash};
@@ -120,9 +120,8 @@ impl IdentityCommon for PeerIdentityInner {
     }
 
     fn truncated_hash(&self) -> [u8; 16] {
-        let pubkey_bytes = self.identity_key.as_bytes();
         let mut hasher = Sha256::new();
-        hasher.update(pubkey_bytes);
+        hasher.update(self.wire_repr());
         let hash = hasher.finalize();
         let mut truncated_hash = [0u8; 16];
         truncated_hash.copy_from_slice(&hash[0..16]);
@@ -131,8 +130,10 @@ impl IdentityCommon for PeerIdentityInner {
 
     fn wire_repr(&self) -> [u8; 64] {
         let mut public_keys = [0u8; 64];
-        public_keys[0..32].copy_from_slice(self.identity_key.as_bytes());
-        public_keys[32..64].copy_from_slice(self.sign_key.as_bytes());
+        let identity_key = *self.identity_key.as_bytes();
+        let sign_key = self.sign_key.to_bytes();
+        public_keys[0..32].copy_from_slice(&identity_key);
+        public_keys[32..64].copy_from_slice(&sign_key);
         public_keys
     }
 }
@@ -314,6 +315,15 @@ impl Identity {
             Identity::Local(_) => true,
             _ => false,
         }
+    }
+
+    pub fn full_hash(&self) -> [u8; 32] {
+        let mut hasher = Sha256::new();
+        hasher.update(self.wire_repr());
+        let hash = hasher.finalize();
+        let mut full_hash = [0u8; 32];
+        full_hash.copy_from_slice(&hash[0..32]);
+        full_hash
     }
 }
 

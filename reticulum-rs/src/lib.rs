@@ -123,6 +123,10 @@ impl<DestStore: DestinationStore, MsgStore: MessageStore> Reticulum<DestStore, M
         let message_store = self.message_store.lock().await;
         message_store.next_inbox(destination).await
     }
+
+    pub async fn force_announce_all_local(&self) -> Result<(), TransportError> {
+        self.transport.force_announce_all_local().await
+    }
 }
 
 #[cfg(test)]
@@ -188,19 +192,19 @@ mod test {
             Timer::after(Duration::from_millis(10)).await;
             assert_eq!(node2.get_known_destinations().await.len(), 2);
             assert!(node1
-                .poll_inbox(&destination1.truncated_hash())
+                .poll_inbox(&destination1.address_hash())
                 .await
                 .is_some());
             assert!(node1
-                .poll_inbox(&destination2.truncated_hash())
+                .poll_inbox(&destination2.address_hash())
                 .await
                 .is_none());
             assert!(node2
-                .poll_inbox(&destination1.truncated_hash())
+                .poll_inbox(&destination1.address_hash())
                 .await
                 .is_none());
             assert!(node2
-                .poll_inbox(&destination2.truncated_hash())
+                .poll_inbox(&destination2.address_hash())
                 .await
                 .is_none());
         });

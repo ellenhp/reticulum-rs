@@ -38,8 +38,6 @@ def program_setup(configpath):
         RNS.Destination.IN,
         RNS.Destination.SINGLE,
         APP_NAME,
-        "announcesample",
-        "fruits"
     )
 
     destination_2 = RNS.Destination(
@@ -60,12 +58,7 @@ def program_setup(configpath):
     destination_1.set_proof_strategy(RNS.Destination.PROVE_ALL)
     destination_2.set_proof_strategy(RNS.Destination.PROVE_ALL)
 
-    # We create an announce handler and configure it to only ask for
-    # announces from "example_utilities.announcesample.fruits".
-    # Try changing the filter and see what happens.
-    announce_handler = ExampleAnnounceHandler(
-        aspect_filter="example_utilities.announcesample.fruits"
-    )
+    announce_handler = ExampleAnnounceHandler()
 
     # We register the announce handler with Reticulum
     RNS.Transport.register_announce_handler(announce_handler)

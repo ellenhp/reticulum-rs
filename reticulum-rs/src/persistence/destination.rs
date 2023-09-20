@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::SystemTime};
+use std::{sync::Arc, time::SystemTime, vec};
 
 use log::debug;
 use sha2::{Digest, Sha256};
@@ -113,10 +113,12 @@ impl Destination {
     }
 
     /// Returns the truncated hash of this destination according to the Reticulum spec.
-    pub fn truncated_hash(&self) -> TruncatedHash {
-        let name = self.full_name();
+    pub fn address_hash(&self) -> TruncatedHash {
         let mut hasher = Sha256::new();
-        hasher.update(name.as_bytes());
+        hasher.update(self.name_hash().0);
+        if let Some(identity) = self.identity() {
+            hasher.update(identity.truncated_hash());
+        }
         TruncatedHash(
             hasher.finalize()[..16]
                 .try_into()
@@ -138,7 +140,7 @@ impl Destination {
 
     /// Returns the hex representation of the truncated hash of this destination according to the Reticulum spec.
     pub fn hex_hash(&self) -> String {
-        hex::encode(self.truncated_hash().0)
+        hex::encode(self.address_hash().0)
     }
 
     pub fn destination_type(&self) -> DestinationType {
@@ -250,7 +252,7 @@ mod tests {
             let mut hasher = Sha256::new();
             hasher.update(destination.full_name().as_bytes());
             let hash = hasher.finalize();
-            assert_eq!(destination.truncated_hash().0, &hash[..16]);
+            assert_eq!(destination.address_hash().0, &hash[..16]);
             assert_eq!(destination.hex_hash(), hex::encode(&hash[..16]));
         });
     }
@@ -304,7 +306,7 @@ impl DestinationBuilder {
         self
     }
 
-    pub(crate) async fn build_single<DestStore: DestinationStore + 'static>(
+    pub async fn build_single<DestStore: DestinationStore + 'static>(
         self,
         identity: &Identity,
         store: &mut DestStore,
@@ -320,7 +322,7 @@ impl DestinationBuilder {
         .await
     }
 
-    pub(crate) async fn build_group<DestStore: DestinationStore + 'static>(
+    pub async fn build_group<DestStore: DestinationStore + 'static>(
         self,
         store: &mut DestStore,
     ) -> Result<Destination, DestinationError> {
@@ -333,7 +335,7 @@ impl DestinationBuilder {
         .await
     }
 
-    pub(crate) async fn build_plain<DestStore: DestinationStore + 'static>(
+    pub async fn build_plain<DestStore: DestinationStore + 'static>(
         self,
         store: &mut DestStore,
     ) -> Result<Destination, DestinationError> {

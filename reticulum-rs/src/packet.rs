@@ -1,5 +1,6 @@
 use std::{borrow::BorrowMut, error::Error, sync::Arc};
 
+use log::warn;
 use packed_struct::{
     prelude::{PackedStruct, PrimitiveEnum},
     PackingError,
@@ -242,7 +243,7 @@ impl WirePacket {
             hops: 0,
         };
         let header_variable = PacketHeaderVariable::Header1(PacketHeader1 {
-            destination_hash: destination.truncated_hash().0,
+            destination_hash: destination.address_hash().0,
             context_type,
         });
         let header = PacketHeader {
@@ -277,8 +278,8 @@ impl WirePacket {
             hops: 0,
         };
         let header_variable = PacketHeaderVariable::Header2(PacketHeader2 {
-            transport_id: transport_id.truncated_hash().0,
-            destination_hash: destination.truncated_hash().0,
+            transport_id: transport_id.address_hash().0,
+            destination_hash: destination.address_hash().0,
             context_type,
         });
         let header = PacketHeader {
@@ -394,6 +395,9 @@ impl WirePacket {
                 .try_into()
                 .map_err(|_err| PacketError::Unknown("Try from slice failed".to_string()))?;
             let app_data = self.payload[148..].to_vec();
+
+            warn!("TODO: Verify signature");
+
             return Ok(Packet::Announce(AnnouncePacket {
                 identity,
                 destination_name_hash,
@@ -479,33 +483,38 @@ impl AnnouncePacket {
             .ok_or(PacketError::AnnounceDestinationNotSingle)?;
         let destination_name_hash = destination.name_hash();
         let random_hash = NameHash(rand::random()); // TODO: Include time? That's what the reference implementation does.
-        let mut payload = vec![0u8; 154];
-        payload[0..64].copy_from_slice(&identity.wire_repr());
-        payload[64..80].copy_from_slice(&destination_name_hash.0);
-        payload[80..90].copy_from_slice(&random_hash.0);
+        let mut signature_material = vec![0u8; 164];
+        signature_material[0..16].copy_from_slice(&destination.address_hash().0);
+        signature_material[16..80].copy_from_slice(&identity.wire_repr());
+        signature_material[80..90].copy_from_slice(&destination_name_hash.0);
+        signature_material[90..100].copy_from_slice(&random_hash.0);
+        println!(
+            "signature_material: {:?}",
+            hex::encode(&signature_material[0..100])
+        );
         if let Identity::Local(local) = identity {
             let signature = local
-                .sign(&payload[0..96])
+                .sign(&signature_material[0..100])
                 .map_err(|err| PacketError::CryptoError(err))?;
-            payload[90..154].copy_from_slice(&signature);
+            signature_material[100..164].copy_from_slice(&signature);
         } else {
             return Err(PacketError::Unknown(
                 "Announce packet identity not local".to_string(),
             ));
         }
-        payload.extend(&app_data);
+        signature_material.extend(&app_data);
         let wire_packet = WirePacket::new_without_transport(
             PacketType::Announce,
             path_context,
             TransportType::Broadcast,
             &destination,
-            payload.to_vec(),
+            signature_material[16..].to_vec(),
         )?;
         Ok(AnnouncePacket {
             identity: identity.clone(),
             destination_name_hash: destination_name_hash,
             random_hash,
-            signature: payload[90..154]
+            signature: signature_material[100..164]
                 .try_into()
                 .map_err(|_err| PacketError::Unknown("Try from slice failed".to_string()))?,
             app_data,
