@@ -3,8 +3,6 @@ use core::error::Error;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::{boxed::Box, vec::Vec};
-use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use embassy_sync::mutex::Mutex;
 use log::warn;
 use packed_struct::prelude::{PackedStruct, PrimitiveEnum};
 
@@ -456,6 +454,7 @@ pub struct AnnouncePacket {
     destination_name_hash: NameHash,
     random_hash: NameHash,
     signature: [u8; 64],
+    #[allow(dead_code)]
     app_data: Vec<u8>,
     wire_packet: WirePacket,
 }
@@ -548,7 +547,11 @@ impl Packet {
 
     pub(crate) async fn destination<DestStore: DestinationStore + 'static>(
         &self,
-        destination_store: &Mutex<CriticalSectionRawMutex, Box<DestStore>>,
+        #[cfg(feature = "embassy")] destination_store: &embassy_sync::mutex::Mutex<
+            embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
+            Box<DestStore>,
+        >,
+        #[cfg(feature = "tokio")] destination_store: &tokio::sync::Mutex<Box<DestStore>>,
     ) -> Option<Destination> {
         match self {
             Packet::Announce(announce) => {
@@ -557,7 +560,7 @@ impl Packet {
                     .resolve_destination(announce.destination_name_hash(), announce.identity())
                     .await
             }
-            Packet::Other(other) => None,
+            Packet::Other(_other) => None,
         }
     }
 }

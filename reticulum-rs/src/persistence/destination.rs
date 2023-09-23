@@ -64,11 +64,11 @@ impl Destination {
             Some(Identity::Local(_)) => true,
             _ => false,
         } {
-            if let Err(err) = store.register_local_destination(&dest) {
+            if let Err(_err) = store.register_local_destination(&dest) {
                 debug!("failed to register local destination");
             }
         } else {
-            if let Err(err) = store.add_destination(dest.clone()).await {
+            if let Err(_err) = store.add_destination(dest.clone()).await {
                 debug!("failed to register non-local destination");
             }
         }

@@ -7,7 +7,7 @@ edition = "2021"
 
 
 [dependencies]
-reticulum-rs = { path = "../reticulum-rs" }
+reticulum-rs = { path = "../reticulum-rs", default-features = false, features = ["embassy"] }
 
 embassy-embedded-hal = { git = "https://github.com/embassy-rs/embassy", features = ["defmt"] }
 embassy-sync = { git = "https://github.com/embassy-rs/embassy", features = ["defmt"] }

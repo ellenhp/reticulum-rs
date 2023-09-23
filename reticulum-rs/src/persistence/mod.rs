@@ -7,11 +7,6 @@ use core::time::Duration;
 
 use alloc::{boxed::Box, format, string::String, vec::Vec};
 use async_trait::async_trait;
-use embassy_sync::{
-    blocking_mutex::raw::{CriticalSectionRawMutex, RawMutex},
-    channel::Sender,
-};
-use embassy_time::Instant;
 use log::warn;
 
 use crate::{
@@ -194,15 +189,18 @@ pub trait DestinationStore: Send + Sync + Sized + 'static {
 
 #[derive(Clone)]
 pub struct AnnounceTableEntry {
-    received_time: Instant,
-    retransmit_timeout: Duration,
-    retries: u8,
-    received_from: Option<Identity>,
+    #[cfg(feature = "embassy")]
+    received_time: embassy_time::Instant,
+    #[cfg(feature = "tokio")]
+    received_time: tokio::time::Instant,
+    _retransmit_timeout: Duration,
+    _retries: u8,
+    _received_from: Option<Identity>,
     destination: Destination,
     packet: AnnouncePacket,
-    local_rebroadcasts: u8,
-    block_rebroadcasts: bool,
-    attached_interface: Option<InterfaceHandle>,
+    _local_rebroadcasts: u8,
+    _block_rebroadcasts: bool,
+    _attached_interface: Option<InterfaceHandle>,
 }
 
 #[async_trait]
@@ -271,8 +269,8 @@ pub trait AnnounceTable {
 
 #[async_trait]
 pub trait MessageStore: Send + Sync + Sized + 'static {
-    fn poll_inbox(&self, destination_hash: &TruncatedHash) -> Option<Packet>;
-    async fn next_inbox(&self, destination_hash: &TruncatedHash) -> Option<Packet>;
+    fn poll_inbox(&mut self, destination_hash: &TruncatedHash) -> Option<Packet>;
+    async fn next_inbox(&mut self, destination_hash: &TruncatedHash) -> Option<Packet>;
     // fn sender(
     //     &mut self,
     //     destination_hash: &TruncatedHash,

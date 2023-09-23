@@ -1,10 +1,6 @@
-use core::borrow::BorrowMut;
 use core::error::Error;
 
 use alloc::{boxed::Box, vec::Vec};
-use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use embassy_sync::channel::{Receiver, Sender};
-use embassy_sync::mutex::Mutex;
 use log::{debug, trace, warn};
 
 use crate::packet::PacketError;
@@ -12,7 +8,7 @@ use crate::{
     identity::Identity,
     interface::{Interface, InterfaceError},
     packet::{AnnouncePacket, Packet, PacketContextType, PacketHeaderVariable, WirePacket},
-    persistence::{AnnounceTable, DestinationStore, MessageStore, PersistenceError},
+    persistence::{DestinationStore, MessageStore, PersistenceError},
 };
 
 #[derive(Debug)]
@@ -30,8 +26,20 @@ pub(crate) struct Transport<
     Iface: Interface,
 > {
     pub(crate) interfaces: &'a [Iface],
-    pub(crate) destination_store: Mutex<CriticalSectionRawMutex, Box<DestStore>>,
-    pub(crate) message_store: Mutex<CriticalSectionRawMutex, Box<MsgStore>>,
+    #[cfg(feature = "embassy")]
+    pub(crate) destination_store: embassy_sync::mutex::Mutex<
+        embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
+        Box<DestStore>,
+    >,
+    #[cfg(feature = "embassy")]
+    pub(crate) message_store: embassy_sync::mutex::Mutex<
+        embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
+        Box<MsgStore>,
+    >,
+    #[cfg(feature = "tokio")]
+    pub(crate) destination_store: tokio::sync::Mutex<Box<DestStore>>,
+    #[cfg(feature = "tokio")]
+    pub(crate) message_store: tokio::sync::Mutex<Box<MsgStore>>,
 }
 
 impl<
@@ -43,8 +51,16 @@ impl<
 {
     pub fn new(
         interfaces: &'a [Iface],
-        destination_store: Mutex<CriticalSectionRawMutex, Box<DestStore>>,
-        message_store: Mutex<CriticalSectionRawMutex, Box<MsgStore>>,
+        #[cfg(feature = "embassy")] destination_store: embassy_sync::mutex::Mutex<
+            embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
+            Box<DestStore>,
+        >,
+        #[cfg(feature = "embassy")] message_store: embassy_sync::mutex::Mutex<
+            embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
+            Box<MsgStore>,
+        >,
+        #[cfg(feature = "tokio")] destination_store: tokio::sync::Mutex<Box<DestStore>>,
+        #[cfg(feature = "tokio")] message_store: tokio::sync::Mutex<Box<MsgStore>>,
     ) -> Result<Transport<'a, DestStore, MsgStore, Iface>, TransportError> {
         // Transport::<DestStore, MsgStore, Iface>::spawn_processing_tasks(
         //     interfaces.clone(),
@@ -76,8 +92,8 @@ impl<
                 .await
                 .map_err(|err| TransportError::Packet(err))?;
 
-            for interface in self.interfaces.clone() {
-                let interface = interface.clone();
+            for interface in self.interfaces {
+                let interface = interface;
                 let message = packet
                     .wire_packet()
                     .pack()
@@ -119,7 +135,13 @@ impl<
 
     async fn recv_from_interface(
         interface: Iface,
-        packet_sender: Sender<'static, CriticalSectionRawMutex, WirePacket, 1>,
+        #[cfg(feature = "embassy")] packet_sender: embassy_sync::channel::Sender<
+            'static,
+            embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
+            WirePacket,
+            1,
+        >,
+        #[cfg(feature = "tokio")] packet_sender: tokio::sync::mpsc::Sender<WirePacket>,
     ) {
         loop {
             let future = interface.recv();
@@ -149,7 +171,11 @@ impl<
 
     async fn maybe_process_announce(
         semantic_packet: &Packet,
-        destination_store: &Mutex<CriticalSectionRawMutex, Box<DestStore>>,
+        #[cfg(feature = "embassy")] destination_store: &embassy_sync::mutex::Mutex<
+            embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
+            Box<DestStore>,
+        >,
+        #[cfg(feature = "tokio")] destination_store: &tokio::sync::Mutex<Box<DestStore>>,
     ) {
         match &semantic_packet {
             crate::packet::Packet::Announce(announce_packet) => {
@@ -181,22 +207,39 @@ impl<
     }
 
     async fn process_packets(
-        packet_receiver: Receiver<'static, CriticalSectionRawMutex, WirePacket, 1>,
-        destination_store: Mutex<CriticalSectionRawMutex, Box<DestStore>>,
-        message_store: Mutex<CriticalSectionRawMutex, Box<MsgStore>>,
+        #[cfg(feature = "embassy")] packet_receiver: embassy_sync::channel::Receiver<
+            'static,
+            embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
+            WirePacket,
+            1,
+        >,
+        #[cfg(feature = "embassy")] destination_store: embassy_sync::mutex::Mutex<
+            embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
+            Box<DestStore>,
+        >,
+        #[cfg(feature = "embassy")] message_store: embassy_sync::mutex::Mutex<
+            embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
+            Box<MsgStore>,
+        >,
+        #[cfg(feature = "tokio")] packet_receiver: &mut tokio::sync::mpsc::Receiver<WirePacket>,
+        #[cfg(feature = "tokio")] destination_store: tokio::sync::Mutex<Box<DestStore>>,
+        #[cfg(feature = "tokio")] message_store: tokio::sync::Mutex<Box<MsgStore>>,
     ) {
         loop {
             trace!("Waiting for packet");
+            #[cfg(feature = "embassy")]
             let packet = packet_receiver.receive().await;
+            #[cfg(feature = "tokio")]
+            let packet = packet_receiver.recv().await.unwrap();
             // trace!("Common: {:?}", packet.header().header_common());
             match packet.header().header_variable() {
-                PacketHeaderVariable::LrProof(hash) => {
+                PacketHeaderVariable::LrProof(_hash) => {
                     // trace!("Received LR proof: {:?}", hash);
                 }
-                PacketHeaderVariable::Header1(header1) => {
+                PacketHeaderVariable::Header1(_header1) => {
                     // trace!("Received header1: {:?}", header1);
                 }
-                PacketHeaderVariable::Header2(header2) => {
+                PacketHeaderVariable::Header2(_header2) => {
                     // trace!("Received header2: {:?}", header2);
                 }
             }

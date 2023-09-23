@@ -1,4 +1,3 @@
-use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, mutex::Mutex};
 use rand::{RngCore, SeedableRng};
 use rand_chacha::ChaCha20Rng;
 
@@ -7,7 +6,15 @@ use rand_chacha::ChaCha20Rng;
 //         Mutex::new(None);
 // }
 
-pub(super) static RNG: Mutex<CriticalSectionRawMutex, Option<ChaCha20Rng>> = Mutex::new(None);
+#[cfg(feature = "embassy")]
+pub(super) static RNG: embassy_sync::mutex::Mutex<
+    embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
+    Option<ChaCha20Rng>,
+> = embassy_sync::mutex::Mutex::new(None);
+#[cfg(feature = "tokio")]
+lazy_static::lazy_static! {
+    pub(crate) static ref RNG: tokio::sync::Mutex<Option<ChaCha20Rng>> = tokio::sync::Mutex::new(None);
+}
 
 pub(crate) async fn random_bytes(bytes: &mut [u8]) {
     let mut rng = RNG.lock().await;
@@ -15,7 +22,7 @@ pub(crate) async fn random_bytes(bytes: &mut [u8]) {
     rng.fill_bytes(bytes);
 }
 
-pub(crate) async fn init_from_seed(seed: [u8; 32]) {
+pub async fn init_from_seed(seed: [u8; 32]) {
     let mut rng = RNG.lock().await;
     *rng = Some(ChaCha20Rng::from_seed(seed));
 }

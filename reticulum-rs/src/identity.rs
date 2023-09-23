@@ -284,7 +284,7 @@ impl Identity {
 mod test {
     use alloc::{boxed::Box, vec::Vec};
 
-    use crate::packet::SignedMessage;
+    use crate::{packet::SignedMessage, random::init_from_seed};
 
     use super::{IdentityCommon, LocalIdentity};
 
@@ -314,6 +314,9 @@ mod test {
 
     #[test]
     fn encrypt_decrypt_local() {
+        tokio_test::block_on(async {
+            init_from_seed([0u8; 32]).await;
+        });
         let identity = super::Identity::new_local();
         let message = b"Hello, world!";
         smol::block_on(async {
@@ -330,6 +333,9 @@ mod test {
 
     #[test]
     fn sign_verify_local() {
+        tokio_test::block_on(async {
+            init_from_seed([0u8; 32]).await;
+        });
         let identity = super::Identity::new_local();
         let message = b"Hello, world!";
         let signature = match &identity {
@@ -346,6 +352,9 @@ mod test {
 
     #[test]
     fn sign_verify_local_tampering() {
+        tokio_test::block_on(async {
+            init_from_seed([0u8; 32]).await;
+        });
         let identity = super::Identity::new_local();
         let message = b"Hello, world!";
         let mut signature = match &identity {

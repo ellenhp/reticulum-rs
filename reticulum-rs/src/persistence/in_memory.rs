@@ -7,9 +7,6 @@ use alloc::boxed::Box;
 use alloc::format;
 use alloc::{string::String, vec::Vec};
 use async_trait::async_trait;
-use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use embassy_sync::channel::{Receiver, Sender};
-use embassy_sync::mutex::Mutex;
 
 use crate::{
     identity::{Identity, IdentityCommon},
@@ -63,7 +60,7 @@ impl IdentityStore for InMemoryIdentityStore {
     async fn add_identity(
         &mut self,
         identity: &Identity,
-        metadata: &IdentityMetadata,
+        _metadata: &IdentityMetadata,
     ) -> Result<(), PersistenceError> {
         self.identities.insert(identity.handle(), identity.clone());
         Ok(())
@@ -161,7 +158,15 @@ impl DestinationStore for InMemoryDestinationStore {
 
 #[derive(Clone)]
 pub struct InMemoryAnnounceTable {
-    announces: Arc<Mutex<CriticalSectionRawMutex, Vec<AnnounceTableEntry>>>,
+    #[cfg(feature = "embassy")]
+    announces: Arc<
+        embassy_sync::mutex::Mutex<
+            embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
+            Vec<AnnounceTableEntry>,
+        >,
+    >,
+    #[cfg(feature = "tokio")]
+    announces: Arc<tokio::sync::Mutex<Vec<AnnounceTableEntry>>>,
 }
 
 pub struct InMemoryAnnounceIterator {
@@ -198,9 +203,14 @@ impl AnnounceTable for InMemoryAnnounceTable {
         let mut announces = self.announces.lock().await;
         let mut new_announces = Vec::new();
         for announce in announces.iter() {
+            #[cfg(feature = "embassy")]
             if announce.received_time.elapsed()
                 < embassy_time::Duration::from_secs(max_age.as_secs())
             {
+                new_announces.push(announce.clone());
+            }
+            #[cfg(feature = "tokio")]
+            if announce.received_time.elapsed() < max_age {
                 new_announces.push(announce.clone());
             }
         }
@@ -210,29 +220,60 @@ impl AnnounceTable for InMemoryAnnounceTable {
 }
 
 pub struct InMemoryMessageStore {
+    #[cfg(feature = "embassy")]
     messages: HashMap<
         TruncatedHash,
         (
-            Sender<'static, CriticalSectionRawMutex, Packet, 1>,
-            Receiver<'static, CriticalSectionRawMutex, Packet, 1>,
+            embassy_sync::channel::Sender<
+                'static,
+                embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
+                Packet,
+                1,
+            >,
+            embassy_sync::channel::Receiver<
+                'static,
+                embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
+                Packet,
+                1,
+            >,
+        ),
+    >,
+    #[cfg(feature = "tokio")]
+    messages: HashMap<
+        TruncatedHash,
+        (
+            tokio::sync::mpsc::Sender<Packet>,
+            tokio::sync::mpsc::Receiver<Packet>,
         ),
     >,
 }
 
 #[async_trait]
 impl MessageStore for InMemoryMessageStore {
-    fn poll_inbox(&self, destination_hash: &TruncatedHash) -> Option<Packet> {
-        let (sender, receiver) = self.messages.get(&destination_hash)?;
+    fn poll_inbox(&mut self, destination_hash: &TruncatedHash) -> Option<Packet> {
+        #[cfg(feature = "embassy")]
+        let (_sender, receiver) = self.messages.get(&destination_hash)?;
+        #[cfg(feature = "tokio")]
+        let (_sender, receiver) = self.messages.get_mut(&destination_hash)?;
+        #[cfg(feature = "embassy")]
         match receiver.try_receive() {
             Ok(packet) => Some(packet),
             // TODO: Do these errors mean we need to do something?
             Err(_) => None,
         }
+        #[cfg(feature = "tokio")]
+        match receiver.try_recv() {
+            Ok(packet) => Some(packet),
+            Err(_) => None,
+        }
     }
 
-    async fn next_inbox(&self, destination_hash: &TruncatedHash) -> Option<Packet> {
-        let (sender, receiver) = self.messages.get(&destination_hash)?;
-        Some(receiver.receive().await)
+    async fn next_inbox(&mut self, destination_hash: &TruncatedHash) -> Option<Packet> {
+        let (_sender, receiver) = self.messages.get_mut(&destination_hash)?;
+        #[cfg(feature = "embassy")]
+        return Some(receiver.receive().await);
+        #[cfg(feature = "tokio")]
+        return receiver.recv().await;
     }
 
     // fn sender(
