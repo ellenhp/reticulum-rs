@@ -62,11 +62,6 @@ impl<
         #[cfg(feature = "tokio")] destination_store: tokio::sync::Mutex<Box<DestStore>>,
         #[cfg(feature = "tokio")] message_store: tokio::sync::Mutex<Box<MsgStore>>,
     ) -> Result<Transport<'a, DestStore, MsgStore, Iface>, TransportError> {
-        // Transport::<DestStore, MsgStore, Iface>::spawn_processing_tasks(
-        //     interfaces.clone(),
-        //     destination_store.clone(),
-        //     message_store.clone(),
-        // )?;
         Ok(Transport {
             destination_store,
             message_store,
@@ -106,42 +101,56 @@ impl<
         Ok(())
     }
 
-    // fn spawn_processing_tasks(
-    //     interfaces: &'a [Iface>],
-    //     destination_store: Mutex<CriticalSectionRawMutex, Box<DestStore>>,
-    //     message_store: Mutex<CriticalSectionRawMutex, Box<MsgStore>>,
-    // ) -> Result<(), TransportError> {
-    //     // let channel = embassy_sync::channel::Channel::new();
-    //     // for interface in interfaces {
-    //     //     let interface = interface.clone();
-    //     //     let packet_sender = channel.sender();
-    //     //     smol::spawn(async move {
-    //     //         let interface = interface;
-    //     //         trace!("Starting interface processing task");
-    //     //         Self::recv_from_interface(interface.clone(), packet_sender.clone()).await
-    //     //     })
-    //     //     .detach();
-    //     // }
-    //     // smol::spawn(async move {
-    //     //     let destination_store = destination_store.clone();
-    //     //     let message_store = message_store.clone();
-    //     //     let packet_receiver = channel.receiver();
-    //     //     trace!("Starting packet processing task");
-    //     //     Self::process_packets(packet_receiver, destination_store, message_store).await;
-    //     // })
-    //     // .detach();
-    //     Ok(())
-    // }
-
-    async fn recv_from_interface(
-        interface: Iface,
-        #[cfg(feature = "embassy")] packet_sender: embassy_sync::channel::Sender<
+    pub(crate) async fn interface_processing_task(
+        interface: &Iface,
+        #[cfg(feature = "embassy")] packet_sender: &embassy_sync::channel::Sender<
             'static,
             embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
             WirePacket,
             1,
         >,
-        #[cfg(feature = "tokio")] packet_sender: tokio::sync::mpsc::Sender<WirePacket>,
+        #[cfg(feature = "tokio")] packet_sender: &tokio::sync::mpsc::Sender<WirePacket>,
+    ) {
+        loop {
+            trace!("Starting interface processing task");
+            Self::recv_from_interface(interface, packet_sender).await
+        }
+    }
+
+    pub(crate) async fn packet_processing_task(
+        #[cfg(feature = "embassy")] packet_receiver: &embassy_sync::channel::Receiver<
+            'static,
+            embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
+            WirePacket,
+            1,
+        >,
+        #[cfg(feature = "embassy")] destination_store: &embassy_sync::mutex::Mutex<
+            embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
+            Box<DestStore>,
+        >,
+        #[cfg(feature = "embassy")] message_store: &embassy_sync::mutex::Mutex<
+            embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
+            Box<MsgStore>,
+        >,
+        #[cfg(feature = "tokio")] packet_receiver: &mut tokio::sync::mpsc::Receiver<WirePacket>,
+        #[cfg(feature = "tokio")] destination_store: &tokio::sync::Mutex<Box<DestStore>>,
+        #[cfg(feature = "tokio")] message_store: &tokio::sync::Mutex<Box<MsgStore>>,
+    ) {
+        loop {
+            trace!("Starting packet processing task");
+            Self::process_packets(packet_receiver, destination_store, message_store).await;
+        }
+    }
+
+    async fn recv_from_interface(
+        interface: &Iface,
+        #[cfg(feature = "embassy")] packet_sender: &embassy_sync::channel::Sender<
+            'static,
+            embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
+            WirePacket,
+            1,
+        >,
+        #[cfg(feature = "tokio")] packet_sender: &tokio::sync::mpsc::Sender<WirePacket>,
     ) {
         loop {
             let future = interface.recv();
@@ -207,23 +216,23 @@ impl<
     }
 
     async fn process_packets(
-        #[cfg(feature = "embassy")] packet_receiver: embassy_sync::channel::Receiver<
+        #[cfg(feature = "embassy")] packet_receiver: &embassy_sync::channel::Receiver<
             'static,
             embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
             WirePacket,
             1,
         >,
-        #[cfg(feature = "embassy")] destination_store: embassy_sync::mutex::Mutex<
+        #[cfg(feature = "embassy")] destination_store: &embassy_sync::mutex::Mutex<
             embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
             Box<DestStore>,
         >,
-        #[cfg(feature = "embassy")] message_store: embassy_sync::mutex::Mutex<
+        #[cfg(feature = "embassy")] message_store: &embassy_sync::mutex::Mutex<
             embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
             Box<MsgStore>,
         >,
         #[cfg(feature = "tokio")] packet_receiver: &mut tokio::sync::mpsc::Receiver<WirePacket>,
-        #[cfg(feature = "tokio")] destination_store: tokio::sync::Mutex<Box<DestStore>>,
-        #[cfg(feature = "tokio")] message_store: tokio::sync::Mutex<Box<MsgStore>>,
+        #[cfg(feature = "tokio")] destination_store: &tokio::sync::Mutex<Box<DestStore>>,
+        #[cfg(feature = "tokio")] message_store: &tokio::sync::Mutex<Box<MsgStore>>,
     ) {
         loop {
             trace!("Waiting for packet");
