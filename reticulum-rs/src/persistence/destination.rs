@@ -1,28 +1,22 @@
-use std::{sync::Arc, time::SystemTime, vec};
-
+use alloc::{
+    string::{String, ToString},
+    vec::Vec,
+};
 use log::debug;
 use sha2::{Digest, Sha256};
-use smol::{
-    channel::{Receiver, Sender},
-    lock::Mutex,
-};
 
 use crate::{
-    identity::{CryptoError, Identity, IdentityCommon},
-    packet::{DestinationType, Packet, PacketError, WirePacket},
+    identity::{Identity, IdentityCommon},
+    packet::{DestinationType, PacketError},
     persistence::DestinationStore,
     NameHash, TruncatedHash,
 };
 
-#[derive(Debug, PartialEq, thiserror::Error)]
+#[derive(Debug, PartialEq)]
 pub enum DestinationError {
-    #[error("app_name must not be empty")]
     EmptyAppName,
-    #[error("app_name must not contain a dot")]
     DotInAppName,
-    #[error("aspect must not be empty")]
     EmptyAspect,
-    #[error("aspect must not contain a dot")]
     DotInAspect,
 }
 
@@ -71,11 +65,11 @@ impl Destination {
             _ => false,
         } {
             if let Err(err) = store.register_local_destination(&dest) {
-                debug!("failed to register local destination: {}", err);
+                debug!("failed to register local destination");
             }
         } else {
-            if let Err(err) = store.add_destination(&dest).await {
-                debug!("failed to register non-local destination: {}", err);
+            if let Err(err) = store.add_destination(dest.clone()).await {
+                debug!("failed to register non-local destination");
             }
         }
         Ok(dest)
@@ -151,11 +145,12 @@ impl Destination {
         }
     }
 
-    pub fn encrypt(&self, payload: Vec<u8>) -> Result<Vec<u8>, PacketError> {
+    pub async fn encrypt(&self, payload: Vec<u8>) -> Result<Vec<u8>, PacketError> {
         match &self.inner {
             DestinationInner::Single(single) => single
                 .identity
                 .encrypt_for(&payload)
+                .await
                 .map_err(|err| PacketError::CryptoError(err)),
             DestinationInner::Group(_) => {
                 todo!("implement group destination encryption")
@@ -178,6 +173,8 @@ pub struct PlainDestination {}
 
 #[cfg(test)]
 mod tests {
+    use alloc::format;
+
     use crate::{identity::IdentityCommon, persistence::in_memory::InMemoryDestinationStore};
 
     use super::*;
@@ -250,7 +247,8 @@ mod tests {
                 format!("app.aspect1.aspect2.{}", hex_hash)
             );
             let mut hasher = Sha256::new();
-            hasher.update(destination.full_name().as_bytes());
+            hasher.update(destination.name_hash().0);
+            hasher.update(identity.truncated_hash());
             let hash = hasher.finalize();
             assert_eq!(destination.address_hash().0, &hash[..16]);
             assert_eq!(destination.hex_hash(), hex::encode(&hash[..16]));

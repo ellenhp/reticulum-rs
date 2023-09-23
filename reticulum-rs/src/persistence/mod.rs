@@ -1,20 +1,21 @@
-#[cfg(feature = "stores")]
+#[cfg(all(test, feature = "stores"))]
 pub mod in_memory;
 
 pub mod destination;
 
-use std::{
-    rc::Rc,
-    sync::Arc,
-    time::{Duration, Instant, SystemTime},
-};
+use core::time::Duration;
 
+use alloc::{boxed::Box, format, string::String, vec::Vec};
 use async_trait::async_trait;
+use embassy_sync::{
+    blocking_mutex::raw::{CriticalSectionRawMutex, RawMutex},
+    channel::Sender,
+};
+use embassy_time::Instant;
 use log::warn;
-use smol::{channel::Sender, lock::Mutex};
 
 use crate::{
-    identity::{self, Identity, IdentityCommon},
+    identity::{Identity, IdentityCommon},
     interface::InterfaceHandle,
     packet::{AnnouncePacket, Packet},
     NameHash, TruncatedHash,
@@ -22,9 +23,8 @@ use crate::{
 
 use self::destination::{Destination, DestinationBuilder};
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug)]
 pub enum PersistenceError {
-    #[error("unspecified error: {0}")]
     Unspecified(String),
 }
 
@@ -137,7 +137,7 @@ pub trait DestinationStore: Send + Sync + Sized + 'static {
                 return None;
             };
             if destination.name_hash() == *hash {
-                self.add_destination(&destination).await.unwrap();
+                self.add_destination(destination.clone()).await.unwrap();
                 return Some(destination);
             }
         }
@@ -173,7 +173,7 @@ pub trait DestinationStore: Send + Sync + Sized + 'static {
         Ok(matching_destinations)
     }
 
-    async fn add_destination(&mut self, destination: &Destination) -> Result<(), PersistenceError>;
+    async fn add_destination(&mut self, destination: Destination) -> Result<(), PersistenceError>;
     async fn get_destination(
         &self,
         hash: &NameHash,
@@ -192,15 +192,13 @@ pub trait DestinationStore: Send + Sync + Sized + 'static {
     ) -> Result<(), PersistenceError>;
 }
 
-pub type AnnounceTableEntryArc = Arc<AnnounceTableEntry>;
-
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AnnounceTableEntry {
     received_time: Instant,
     retransmit_timeout: Duration,
     retries: u8,
     received_from: Option<Identity>,
-    destination: Arc<Destination>,
+    destination: Destination,
     packet: AnnouncePacket,
     local_rebroadcasts: u8,
     block_rebroadcasts: bool,
@@ -209,19 +207,17 @@ pub struct AnnounceTableEntry {
 
 #[async_trait]
 pub trait AnnounceTable {
-    async fn table_iter(&self) -> Box<dyn Iterator<Item = AnnounceTableEntryArc>>;
+    async fn table_iter(&self) -> Box<dyn Iterator<Item = AnnounceTableEntry>>;
 
-    async fn push_announce(
-        &mut self,
-        announce: AnnounceTableEntryArc,
-    ) -> Result<(), PersistenceError>;
+    async fn push_announce(&mut self, announce: AnnounceTableEntry)
+        -> Result<(), PersistenceError>;
 
     async fn expire_announces(&mut self, max_age: Duration) -> Result<(), PersistenceError>;
 
     async fn get_announce_by_destination(
         &self,
         destination: &Destination,
-    ) -> Result<Option<AnnounceTableEntryArc>, PersistenceError> {
+    ) -> Result<Option<AnnounceTableEntry>, PersistenceError> {
         let all_announces = self.table_iter().await;
         let mut matching_announces = Vec::new();
         let mut earliest_receipt = None;
@@ -277,5 +273,8 @@ pub trait AnnounceTable {
 pub trait MessageStore: Send + Sync + Sized + 'static {
     fn poll_inbox(&self, destination_hash: &TruncatedHash) -> Option<Packet>;
     async fn next_inbox(&self, destination_hash: &TruncatedHash) -> Option<Packet>;
-    fn sender(&mut self, destination_hash: &TruncatedHash) -> Option<Sender<Packet>>;
+    // fn sender(
+    //     &mut self,
+    //     destination_hash: &TruncatedHash,
+    // ) -> Option<Sender<'static, CriticalSectionRawMutex, Packet, 1>>;
 }

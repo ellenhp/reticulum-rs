@@ -1,10 +1,15 @@
-use std::{collections::HashMap, rc::Rc, sync::Arc, time::Duration};
+#[cfg(test)]
+extern crate std;
 
+use std::{collections::HashMap, sync::Arc, time::Duration};
+
+use alloc::boxed::Box;
+use alloc::format;
+use alloc::{string::String, vec::Vec};
 use async_trait::async_trait;
-use smol::{
-    channel::{Receiver, Sender},
-    lock::Mutex,
-};
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::channel::{Receiver, Sender};
+use embassy_sync::mutex::Mutex;
 
 use crate::{
     identity::{Identity, IdentityCommon},
@@ -12,9 +17,10 @@ use crate::{
     TruncatedHash,
 };
 
+use super::AnnounceTableEntry;
 use super::{
-    destination::Destination, AnnounceTable, AnnounceTableEntry, AnnounceTableEntryArc,
-    DestinationStore, IdentityMetadata, IdentityStore, MessageStore, PersistenceError,
+    destination::Destination, AnnounceTable, DestinationStore, IdentityMetadata, IdentityStore,
+    MessageStore, PersistenceError,
 };
 
 pub struct InMemoryIdentityStore {
@@ -132,7 +138,7 @@ impl DestinationStore for InMemoryDestinationStore {
         Ok(matching_destinations)
     }
 
-    async fn add_destination(&mut self, destination: &Destination) -> Result<(), PersistenceError> {
+    async fn add_destination(&mut self, destination: Destination) -> Result<(), PersistenceError> {
         if !self.destinations.contains_key(&destination.full_name()) {
             self.destinations
                 .insert(destination.full_name(), destination.clone());
@@ -153,17 +159,17 @@ impl DestinationStore for InMemoryDestinationStore {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct InMemoryAnnounceTable {
-    announces: Arc<Mutex<Vec<AnnounceTableEntryArc>>>,
+    announces: Arc<Mutex<CriticalSectionRawMutex, Vec<AnnounceTableEntry>>>,
 }
 
 pub struct InMemoryAnnounceIterator {
-    announces: Vec<AnnounceTableEntryArc>,
+    announces: Vec<AnnounceTableEntry>,
 }
 
 impl Iterator for InMemoryAnnounceIterator {
-    type Item = AnnounceTableEntryArc;
+    type Item = AnnounceTableEntry;
 
     fn next(&mut self) -> Option<Self::Item> {
         self.announces.pop()
@@ -172,9 +178,8 @@ impl Iterator for InMemoryAnnounceIterator {
 
 #[async_trait]
 impl AnnounceTable for InMemoryAnnounceTable {
-    async fn table_iter(&self) -> Box<dyn Iterator<Item = AnnounceTableEntryArc>> {
-        let announces = self.announces.lock();
-        let announces = announces.await;
+    async fn table_iter(&self) -> Box<dyn Iterator<Item = AnnounceTableEntry>> {
+        let announces = self.announces.lock().await;
         Box::new(InMemoryAnnounceIterator {
             announces: announces.clone(),
         })
@@ -182,20 +187,20 @@ impl AnnounceTable for InMemoryAnnounceTable {
 
     async fn push_announce(
         &mut self,
-        announce: AnnounceTableEntryArc,
+        announce: AnnounceTableEntry,
     ) -> Result<(), PersistenceError> {
-        let announces = self.announces.lock();
-        let mut announces = announces.await;
+        let mut announces = self.announces.lock().await;
         announces.push(announce);
         Ok(())
     }
 
     async fn expire_announces(&mut self, max_age: Duration) -> Result<(), PersistenceError> {
-        let announces = self.announces.lock();
-        let mut announces = announces.await;
+        let mut announces = self.announces.lock().await;
         let mut new_announces = Vec::new();
         for announce in announces.iter() {
-            if announce.received_time.elapsed() < max_age {
+            if announce.received_time.elapsed()
+                < embassy_time::Duration::from_secs(max_age.as_secs())
+            {
                 new_announces.push(announce.clone());
             }
         }
@@ -205,14 +210,20 @@ impl AnnounceTable for InMemoryAnnounceTable {
 }
 
 pub struct InMemoryMessageStore {
-    messages: HashMap<TruncatedHash, (Sender<Packet>, Receiver<Packet>)>,
+    messages: HashMap<
+        TruncatedHash,
+        (
+            Sender<'static, CriticalSectionRawMutex, Packet, 1>,
+            Receiver<'static, CriticalSectionRawMutex, Packet, 1>,
+        ),
+    >,
 }
 
 #[async_trait]
 impl MessageStore for InMemoryMessageStore {
     fn poll_inbox(&self, destination_hash: &TruncatedHash) -> Option<Packet> {
         let (sender, receiver) = self.messages.get(&destination_hash)?;
-        match receiver.try_recv() {
+        match receiver.try_receive() {
             Ok(packet) => Some(packet),
             // TODO: Do these errors mean we need to do something?
             Err(_) => None,
@@ -221,23 +232,24 @@ impl MessageStore for InMemoryMessageStore {
 
     async fn next_inbox(&self, destination_hash: &TruncatedHash) -> Option<Packet> {
         let (sender, receiver) = self.messages.get(&destination_hash)?;
-        match receiver.recv().await {
-            Ok(packet) => Some(packet),
-            // TODO: Do these errors mean we need to do something?
-            Err(_) => None,
-        }
+        Some(receiver.receive().await)
     }
 
-    fn sender(&mut self, destination_hash: &TruncatedHash) -> Option<Sender<Packet>> {
-        if let Some((sender, _receiver)) = self.messages.get(&destination_hash) {
-            Some(sender.clone())
-        } else {
-            let (sender, receiver) = smol::channel::bounded(16);
-            self.messages
-                .insert(destination_hash.clone(), (sender.clone(), receiver));
-            Some(sender)
-        }
-    }
+    // fn sender(
+    //     &mut self,
+    //     destination_hash: &TruncatedHash,
+    // ) -> Option<Sender<'static, CriticalSectionRawMutex, Packet, 1>> {
+    //     if let Some((sender, _receiver)) = self.messages.get(&destination_hash) {
+    //         Some(sender.clone())
+    //     } else {
+    //         let channel = embassy_sync::channel::Channel::new();
+    //         self.messages.insert(
+    //             destination_hash.clone(),
+    //             (channel.sender(), channel.receiver()),
+    //         );
+    //         Some(channel.sender())
+    //     }
+    // }
 }
 
 impl InMemoryMessageStore {

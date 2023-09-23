@@ -1,34 +1,37 @@
-use std::{borrow::BorrowMut, cell::RefCell, sync::Arc};
+#[cfg(test)]
+extern crate std;
 
+use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::Mutex;
+
+use alloc::boxed::Box;
+use alloc::format;
+use alloc::{sync::Arc, vec::Vec};
 use async_trait::async_trait;
-use smol::{
-    channel::{self, Receiver, Sender},
-    lock::Mutex,
-};
 
 use super::{Interface, InterfaceError};
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ChannelInterface {
     senders: Arc<Mutex<Vec<Sender<Vec<u8>>>>>,
-    receiver: Receiver<Vec<u8>>,
+    receiver: Arc<Mutex<Receiver<Vec<u8>>>>,
 }
 
 impl ChannelInterface {
     pub fn new() -> Self {
-        let (sender, receiver) = channel::bounded(100);
+        let (sender, receiver) = channel();
         Self {
-            senders: Arc::new(Mutex::new(vec![sender])),
-            receiver,
+            senders: Arc::new(Mutex::new([sender].to_vec())),
+            receiver: Arc::new(Mutex::new(receiver)),
         }
     }
 
     pub async fn clone(&self) -> Self {
-        let (sender, receiver) = channel::bounded(100);
-        self.senders.lock().await.push(sender);
+        let (sender, receiver) = channel();
+        self.senders.lock().unwrap().push(sender);
         Self {
             senders: self.senders.clone(),
-            receiver,
+            receiver: Arc::new(Mutex::new(receiver)),
         }
     }
 }
@@ -36,9 +39,9 @@ impl ChannelInterface {
 #[async_trait]
 impl Interface for ChannelInterface {
     async fn queue_send(&self, message: &[u8]) -> Result<(), InterfaceError> {
-        let senders = self.senders.lock().await;
+        let senders = self.senders.lock().unwrap();
         for sender in senders.iter() {
-            let _ = sender.send(message.to_vec()).await.map_err(|err| {
+            let _ = sender.send(message.to_vec()).map_err(|err| {
                 InterfaceError::Unspecified(format!(
                     "failed to queue message for sending: {:?}",
                     err
@@ -49,7 +52,7 @@ impl Interface for ChannelInterface {
     }
 
     async fn recv(&self) -> Result<Vec<u8>, InterfaceError> {
-        self.receiver.recv().await.map_err(|err| {
+        self.receiver.lock().unwrap().recv().map_err(|err| {
             InterfaceError::Unspecified(format!("failed to receive message: {:?}", err))
         })
     }

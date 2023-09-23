@@ -8,23 +8,25 @@ name = "integration_tests"
 path = "bin/integration_tests.rs"
 
 [dependencies]
-anyhow = "1.0"
 async-trait = "0.1.73"
-base64 = "0.21.4"
-ed25519-dalek = { version = "2.0", features = [ "digest", "rand_core" ] }
-env_logger = "0.10.0"
-fernet = { version = "0.2", features = ["rustcrypto"], default-features = false }
-hex = "0.4.3"
+base64 = { version = "0.21", default-features = false, features = ["alloc"] }
+ed25519-dalek = { version = "2.0", default-features = false, features = ["rand_core"] }
+fernet = { path = "../fernet-rs" }
+hex = { version = "0.4", default-features = false, features = ["alloc"] }
 hkdf = "0.12.3"
 log = "0.4.20"
-packed_struct = "0.10.1"
-rand = "0.8.5"
-rmp-serde = "1.1.2"
-serde = { version = "1.0", features = ["derive"] }
-sha2 = { version = "0.10", features = ["std"] }
-smol = "1.3.0"
-thiserror = "1.0.48"
+getrandom = { version = "0.2", default-features = false, features = ["custom"] }
+packed_struct = { version = "0.10.1", default-features = false, features = ["alloc"] }
+rand = { version = "0.8.5", default-features = false, features = ["rand_chacha"] }
+sha2 = { version = "0.10", default-features = false }
 x25519-dalek = { version = "2.0", features = ["reusable_secrets", "static_secrets"] }
+embassy-sync = { git = "https://github.com/embassy-rs/embassy", features = ["defmt"] }
+embassy-futures = { git = "https://github.com/embassy-rs/embassy" }
+embassy-time = { git = "https://github.com/embassy-rs/embassy", features = ["nightly", "unstable-traits", "defmt", "defmt-timestamp-uptime"] }
+rand_chacha = { version = "0.3.1", default-features = false }
+
+[dev-dependencies]
+smol = "^1.2"
 
 [features]
 default = ["interfaces", "stores"]
