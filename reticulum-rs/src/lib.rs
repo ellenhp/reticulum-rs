@@ -8,10 +8,9 @@ extern crate alloc;
 use core::error::Error;
 
 use alloc::{boxed::Box, string::String, vec::Vec};
+use defmt::{debug, trace};
 pub use fernet;
 use identity::Identity;
-use interface::{ChannelData, Interface, InterfaceError};
-use log::{debug, trace, warn};
 use packet::{AnnouncePacket, Packet, PacketContextType, PacketError, WirePacket};
 use persistence::{destination::Destination, PersistenceError, ReticulumStore};
 
@@ -19,7 +18,6 @@ use crate::packet::PacketHeaderVariable;
 
 pub mod constants;
 pub mod identity;
-pub mod interface;
 pub mod packet;
 pub mod persistence;
 pub mod random;
@@ -27,7 +25,6 @@ pub mod random;
 #[derive(Debug)]
 pub enum ReticulumError {
     Persistence(PersistenceError),
-    Interface(InterfaceError),
     Transport(TransportError),
     Unspecified(Box<dyn Error>),
 }
@@ -74,59 +71,14 @@ pub type PacketSender = tokio::sync::mpsc::Sender<PacketChannelData>;
 pub type PacketReceiver = tokio::sync::mpsc::Receiver<PacketChannelData>;
 
 pub struct Reticulum<'a> {
-    interfaces: &'a [Box<dyn Interface>],
-    #[cfg(feature = "tokio")]
-    packet_sender: PacketSender,
-    #[cfg(feature = "tokio")]
-    packet_receiver: tokio::sync::Mutex<PacketReceiver>,
-    #[cfg(feature = "embassy")]
-    channel: embassy_sync::channel::Channel<
-        embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
-        PacketChannelData,
-        1,
-    >,
     reticulum_store: &'a Box<dyn ReticulumStore>,
 }
 
 impl<'a> Reticulum<'a> {
-    #[cfg(feature = "tokio")]
     pub fn new(
-        interfaces: &'a [Box<dyn Interface>],
         reticulum_store: &'a Box<dyn ReticulumStore>,
     ) -> Result<Reticulum<'a>, ReticulumError> {
-        let (packet_sender, mut packet_receiver) = tokio::sync::mpsc::channel(10);
-
-        let store = &reticulum_store;
-
-        return Ok(Reticulum {
-            packet_sender,
-            packet_receiver: tokio::sync::Mutex::new(packet_receiver),
-            interfaces,
-            reticulum_store,
-        });
-    }
-
-    #[cfg(feature = "embassy")]
-    pub async fn new_from_channel(
-        interfaces: &'a [Box<dyn Interface>],
-        reticulum_store: &'a Box<dyn ReticulumStore>,
-        channel: embassy_sync::channel::Channel<
-            embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
-            PacketChannelData,
-            1,
-        >,
-        spawner: embassy_executor::Spawner,
-    ) -> Result<Reticulum<'a>, ReticulumError> {
-        let interfaces = interfaces;
-        let channel = channel;
-        let node = Reticulum {
-            interfaces,
-            channel,
-            reticulum_store,
-        };
-        spawner.spawn(embassy_process_packets_task()).unwrap();
-        spawner.spawn(embassy_process_interface_tasks()).unwrap();
-        return Ok(node);
+        return Ok(Reticulum { reticulum_store });
     }
 
     pub async fn get_known_destinations(&self) -> Vec<Destination> {
@@ -173,7 +125,8 @@ impl<'a> Reticulum<'a> {
         self.reticulum_store.next_inbox(destination).await
     }
 
-    pub async fn force_announce_all_local(&self) -> Result<(), TransportError> {
+    pub async fn announce_local_destinations(&self) -> Result<Vec<WirePacket>, TransportError> {
+        let mut packets = Vec::new();
         let destinations = self
             .reticulum_store
             .get_all_destinations()
@@ -190,59 +143,9 @@ impl<'a> Reticulum<'a> {
                 .await
                 .map_err(|err| TransportError::Packet(err))?;
 
-            for interface in self.interfaces {
-                let message = packet
-                    .wire_packet()
-                    .pack()
-                    .map_err(|err| TransportError::Packet(err))?;
-                let interface = interface;
-                let message = message;
-                interface.queue_send(&message).await.unwrap();
-            }
+            packets.push(packet.wire_packet().clone());
         }
-        Ok(())
-    }
-
-    async fn interface_receive_loop(interface: &Box<dyn Interface>, packet_sender: &PacketSender) {
-        loop {
-            let future = interface.recv();
-            let message = match future.await {
-                Ok(message) => message,
-                Err(InterfaceError::Recoverable(inner)) => {
-                    panic!();
-                    debug!("Recoverable error: {:?}", inner);
-                    continue;
-                }
-                Err(inner) => {
-                    panic!();
-                    warn!("Unrecoverable error: {:?}", inner);
-                    break;
-                }
-            };
-            let message = match message {
-                ChannelData::Message(message) => message,
-                ChannelData::Close => {
-                    panic!();
-                    break;
-                }
-            };
-            let packet = match WirePacket::unpack(&message) {
-                Ok(packet) => packet,
-                Err(_) => {
-                    panic!();
-                    debug!("Failed to unpack packet");
-                    continue;
-                }
-            };
-            if let Err(err) = packet_sender.try_send(PacketChannelData::Packet(packet)) {
-                panic!();
-                debug!("Failed to send packet to processing task");
-            }
-        }
-        #[cfg(feature = "embassy")]
-        packet_sender.send(PacketChannelData::Close).await;
-        #[cfg(feature = "tokio")]
-        packet_sender.send(PacketChannelData::Close).await.unwrap();
+        Ok(packets)
     }
 
     async fn maybe_process_announce(
@@ -264,8 +167,8 @@ impl<'a> Reticulum<'a> {
                         Ok(_) => {
                             trace!("Added destination to store");
                         }
-                        Err(err) => {
-                            debug!("Failed to add destination to store: {:?}", err);
+                        Err(_err) => {
+                            debug!("Failed to add destination to store");
                         }
                     }
                 } else {
@@ -276,19 +179,7 @@ impl<'a> Reticulum<'a> {
         }
     }
 
-    pub async fn packet_process_iter(&self) -> Result<(), ()> {
-        trace!("Waiting for packet");
-        #[cfg(feature = "embassy")]
-        let packet = self.channel.receive().await;
-        #[cfg(feature = "tokio")]
-        let packet = self.packet_receiver.lock().await.recv().await.unwrap();
-        let packet = match packet {
-            PacketChannelData::Packet(packet) => packet,
-            PacketChannelData::Close => {
-                debug!("Received close message");
-                return Err(());
-            }
-        };
+    pub async fn process_packet(&self, packet: WirePacket) -> Result<(), ()> {
         // trace!("Common: {:?}", packet.header().header_common());
         match packet.header().header_variable() {
             PacketHeaderVariable::LrProof(_hash) => {
@@ -306,15 +197,14 @@ impl<'a> Reticulum<'a> {
                 trace!("Converted packet to semantic packet");
                 semantic_packet
             }
-            Err(err) => {
-                debug!("Failed to convert packet to semantic packet: {:?}", err);
+            Err(_err) => {
+                debug!("Failed to convert packet to semantic packet");
                 return Ok(());
             }
         };
         // trace!("Semantic packet: {:?}", semantic_packet);
         Self::maybe_process_announce(&semantic_packet, &self.reticulum_store).await;
         if let Some(destination) = semantic_packet.destination(&self.reticulum_store).await {
-            trace!("Destination: {:?}", destination);
             if let Some(Identity::Local(_)) = destination.identity() {
                 trace!("Destination is local");
                 // if let Some(sender) = message_store
@@ -342,14 +232,6 @@ impl<'a> Reticulum<'a> {
     }
 }
 
-#[cfg(feature = "embassy")]
-#[embassy_executor::task]
-async fn embassy_process_packets_task() {}
-
-#[cfg(feature = "embassy")]
-#[embassy_executor::task]
-async fn embassy_process_interface_tasks() {}
-
 #[cfg(test)]
 mod test {
     #[cfg(test)]
@@ -359,14 +241,12 @@ mod test {
 
     use crate::{
         identity::Identity,
-        interface::{channel::ChannelInterface, Interface},
         persistence::{
             destination::Destination, in_memory::InMemoryReticulumStore, ReticulumStore,
         },
         Reticulum,
     };
     use alloc::{boxed::Box, string::ToString, vec::Vec};
-    use log::warn;
     use rand::Rng;
     use rand_chacha::rand_core::OsRng;
 
@@ -380,16 +260,13 @@ mod test {
         });
     }
 
-    async fn create_node<'a>(
-        interfaces: &'a [Box<dyn Interface>],
-        store: &'a Box<dyn ReticulumStore>,
-    ) -> Reticulum<'a> {
+    async fn create_node<'a>(store: &'a Box<dyn ReticulumStore>) -> Reticulum<'a> {
         store
             .register_destination_name("app".to_string(), Vec::new())
             .await
             .unwrap();
 
-        let node = Reticulum::new(interfaces, &store).unwrap();
+        let node = Reticulum::new(&store).unwrap();
         node
     }
 
@@ -406,21 +283,21 @@ mod test {
     fn test_announce() {
         init_test();
         tokio_test::block_on(async {
-            let interface1 = ChannelInterface::new();
-            let interface2 = interface1.clone().await;
-            let store: Box<dyn ReticulumStore> = Box::new(InMemoryReticulumStore::new());
-            let interface1: Box<dyn Interface> = Box::new(interface1);
-            let interface2: Box<dyn Interface> = Box::new(interface2);
-            let interfaces1 = &[interface1];
-            let interfaces2 = &[interface2];
-            let reticulum1 = create_node(interfaces1, &store).await;
-            let reticulum2 = create_node(interfaces2, &store).await;
+            let store1: Box<dyn ReticulumStore> = Box::new(InMemoryReticulumStore::new());
+            let store2: Box<dyn ReticulumStore> = Box::new(InMemoryReticulumStore::new());
+            let reticulum1 = create_node(&store1).await;
+            let reticulum2 = create_node(&store2).await;
             let node1 = &reticulum1;
             let node2 = &reticulum2;
-            let destination1 = setup_node(&node1).await;
+            let _destination1 = setup_node(&node1).await;
             // let destination2 = setup_node(&node2).await;
 
-            node1.force_announce_all_local().await.unwrap();
+            assert_eq!(node2.get_known_destinations().await.len(), 0);
+            let packets = node1.announce_local_destinations().await.unwrap();
+            assert_eq!(packets.len(), 1);
+            for packet in packets {
+                node2.process_packet(packet).await.unwrap();
+            }
             tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
             assert_eq!(node2.get_known_destinations().await.len(), 1);
         })
@@ -430,24 +307,23 @@ mod test {
     fn test_announce_bidirectional() {
         init_test();
         tokio_test::block_on(async {
-            let interface1 = ChannelInterface::new();
-            let interface2 = interface1.clone().await;
-            let store: Box<dyn ReticulumStore> = Box::new(InMemoryReticulumStore::new());
-            let interface1: Box<dyn Interface> = Box::new(interface1);
-            let interface2: Box<dyn Interface> = Box::new(interface2);
-            let interfaces1 = &[interface1];
-            let interfaces2 = &[interface2];
-            let reticulum1 = create_node(interfaces1, &store).await;
-            let reticulum2 = create_node(interfaces2, &store).await;
+            let store1: Box<dyn ReticulumStore> = Box::new(InMemoryReticulumStore::new());
+            let store2: Box<dyn ReticulumStore> = Box::new(InMemoryReticulumStore::new());
+            let reticulum1 = create_node(&store1).await;
+            let reticulum2 = create_node(&store2).await;
             let node1 = &reticulum1;
             let node2 = &reticulum2;
-            let destination1 = setup_node(&node1).await;
-            let destination2 = setup_node(&node2).await;
-            warn!("destination1: {:?}", destination1);
-            warn!("destination2: {:?}", destination2);
+            let _destination1 = setup_node(&node1).await;
+            let _destination2 = setup_node(&node2).await;
 
-            node1.force_announce_all_local().await.unwrap();
-            node2.force_announce_all_local().await.unwrap();
+            assert_eq!(node1.get_local_destinations().await.len(), 1);
+            assert_eq!(node2.get_local_destinations().await.len(), 1);
+            for packet in node1.announce_local_destinations().await.unwrap() {
+                node2.process_packet(packet).await.unwrap();
+            }
+            for packet in node2.announce_local_destinations().await.unwrap() {
+                node1.process_packet(packet).await.unwrap();
+            }
             tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
             assert_eq!(node1.get_known_destinations().await.len(), 2);
             assert_eq!(node2.get_known_destinations().await.len(), 2);

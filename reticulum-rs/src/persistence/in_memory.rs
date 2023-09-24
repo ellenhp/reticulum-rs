@@ -2,7 +2,7 @@ use alloc::boxed::Box;
 use alloc::format;
 use alloc::{string::String, vec::Vec};
 use async_trait::async_trait;
-use log::{trace, warn};
+use defmt::{trace, warn};
 
 use crate::identity::Identity;
 use crate::NameHash;
@@ -136,7 +136,7 @@ impl ReticulumStore for InMemoryReticulumStore {
                 .await
                 .push((destination.full_name(), destination.clone()));
         } else {
-            trace!("destination already exists: {:?}", destination);
+            trace!("destination already exists");
         }
         Ok(())
     }

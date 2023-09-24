@@ -3,7 +3,7 @@ use core::error::Error;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::{boxed::Box, vec::Vec};
-use log::warn;
+use defmt::warn;
 use packed_struct::prelude::{PackedStruct, PrimitiveEnum};
 
 use crate::random::random_bytes;

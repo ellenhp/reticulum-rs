@@ -8,7 +8,6 @@ use async_trait::async_trait;
 
 use crate::{
     identity::Identity,
-    interface::InterfaceHandle,
     packet::{AnnouncePacket, Packet},
     NameHash, TruncatedHash,
 };
@@ -64,17 +63,17 @@ pub trait ReticulumStore: Send + Sync + 'static {
 #[derive(Clone)]
 pub struct AnnounceTableEntry {
     #[cfg(feature = "embassy")]
-    received_time: embassy_time::Instant,
+    _received_time: embassy_time::Instant,
     #[cfg(feature = "tokio")]
-    received_time: tokio::time::Instant,
+    _received_time: tokio::time::Instant,
     _retransmit_timeout: Duration,
     _retries: u8,
     _received_from: Option<Identity>,
-    destination: Destination,
-    packet: AnnouncePacket,
+    _destination: Destination,
+    _packet: AnnouncePacket,
     _local_rebroadcasts: u8,
     _block_rebroadcasts: bool,
-    _attached_interface: Option<InterfaceHandle>,
+    // _attached_interface: Option<InterfaceHandle>,
 }
 
 #[async_trait]

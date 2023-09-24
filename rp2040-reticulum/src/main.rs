@@ -3,7 +3,7 @@
 #![feature(type_alias_impl_trait)]
 extern crate alloc;
 
-use alloc::boxed::Box;
+use alloc::{boxed::Box, string::ToString};
 use defmt::*;
 use embassy_executor::Spawner;
 use embassy_rp::gpio;
@@ -15,6 +15,7 @@ use gpio::{Level, Output};
 use reticulum_rs::{
     identity::Identity,
     persistence::{in_memory::InMemoryReticulumStore, ReticulumStore},
+    Reticulum,
 };
 use {defmt_rtt as _, panic_probe as _};
 
@@ -43,20 +44,40 @@ async fn main(spawner: Spawner) {
     let p = embassy_rp::init(Default::default());
     let mut led = Output::new(p.PIN_25, Level::Low);
 
-    let channel = channel::Channel::new();
-    let store: Box<dyn ReticulumStore> = Box::new(InMemoryReticulumStore::new());
-    store
-        .destination_builder("app")
-        .build_single(&Identity::new_local().await, &store)
+    let store1: Box<dyn ReticulumStore> = Box::new(InMemoryReticulumStore::new());
+    let store2: Box<dyn ReticulumStore> = Box::new(InMemoryReticulumStore::new());
+
+    store1
+        .register_destination_name("app".to_string(), [].to_vec())
+        .await
+        .unwrap();
+    store2
+        .register_destination_name("app".to_string(), [].to_vec())
         .await
         .unwrap();
 
-    let reticulum = reticulum_rs::Reticulum::new_from_channel(&[], &store, channel, spawner)
+    let reticulum1 = Reticulum::new(&store1).unwrap();
+    let reticulum2 = Reticulum::new(&store2).unwrap();
+
+    let destination1 = store1
+        .destination_builder("app")
+        .build_single(&Identity::new_local().await, &store1)
         .await
         .unwrap();
-    reticulum.force_announce_all_local().await.unwrap();
+
+    let mut announce_packets = 0;
+    for packet in reticulum1.announce_local_destinations().await.unwrap() {
+        announce_packets += 1;
+        reticulum2.process_packet(packet).await.unwrap();
+    }
 
     loop {
+        info!(
+            "annoucnes: {}, destinations: {:?}, {:?}",
+            announce_packets,
+            store1.get_all_destinations().await.unwrap().len(),
+            store2.get_all_destinations().await.unwrap().len(),
+        );
         info!("led on!");
         led.set_high();
         Timer::after(Duration::from_secs(1)).await;

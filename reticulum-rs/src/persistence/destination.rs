@@ -5,7 +5,7 @@ use alloc::{
     string::{String, ToString},
     vec::Vec,
 };
-use log::debug;
+use defmt::debug;
 use sha2::{Digest, Sha256};
 
 use crate::{

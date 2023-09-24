@@ -14,7 +14,7 @@ ed25519-dalek = { version = "2.0", default-features = false, features = ["rand_c
 fernet = { path = "../fernet-rs" }
 hex = { version = "0.4", default-features = false, features = ["alloc"] }
 hkdf = "0.12.3"
-log = "0.4.20"
+defmt = "0.3"
 getrandom = { version = "0.2", default-features = false, features = ["custom"] }
 packed_struct = { version = "0.10.1", default-features = false }
 rand = { version = "0.8.5", default-features = false, features = ["rand_chacha"] }
