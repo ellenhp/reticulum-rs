@@ -8,7 +8,11 @@ use hkdf::Hkdf;
 use sha2::{Digest, Sha256};
 use x25519_dalek::PublicKey;
 
-use crate::{packet::SignedMessage, random::RNG, TruncatedHash};
+use crate::{
+    packet::SignedMessage,
+    random::{random_bytes, RNG},
+    TruncatedHash,
+};
 
 #[derive(Debug, PartialEq)]
 pub enum CryptoError {
@@ -42,12 +46,6 @@ pub trait LocalIdentity {
 pub struct PeerIdentityInner {
     identity_key: x25519_dalek::PublicKey,
     sign_key: ed25519_dalek::VerifyingKey,
-}
-
-#[derive(Debug, Clone)]
-struct PeerIdentityInnerData {
-    identity_key: [u8; 32],
-    sign_key: [u8; 32],
 }
 
 #[async_trait]
@@ -119,14 +117,6 @@ pub struct LocalIdentityInner {
     public_keys: PeerIdentityInner,
     private_key: x25519_dalek::StaticSecret,
     private_sign_key: ed25519_dalek::SigningKey,
-}
-
-#[derive(Debug)]
-struct LocalIdentityInnerData {
-    public_keys: PeerIdentityInner,
-    private_key: [u8; 32],
-    private_sign_public: [u8; 32],
-    private_sign_private: [u8; 32],
 }
 
 impl Debug for LocalIdentityInner {
@@ -225,11 +215,14 @@ impl IdentityCommon for Identity {
 }
 
 impl Identity {
-    pub fn new_local() -> Identity {
-        let danger_zero_key = [0u8; 32];
-        let private_key = x25519_dalek::StaticSecret::from(danger_zero_key);
+    pub async fn new_local() -> Identity {
+        let mut key = [0u8; 32];
+        random_bytes(&mut key).await;
+        let private_key = x25519_dalek::StaticSecret::from(key);
         let public_key = x25519_dalek::PublicKey::from(&private_key);
-        let private_sign_key = ed25519_dalek::SigningKey::from_bytes(&danger_zero_key);
+
+        random_bytes(&mut key).await;
+        let private_sign_key = ed25519_dalek::SigningKey::from_bytes(&key);
         let public_sign_key = private_sign_key.verifying_key();
         let peer_identity = PeerIdentityInner {
             identity_key: public_key,
@@ -284,7 +277,7 @@ impl Identity {
 mod test {
     use alloc::{boxed::Box, vec::Vec};
 
-    use crate::{packet::SignedMessage, random::init_from_seed};
+    use crate::{packet::SignedMessage, test::init_test};
 
     use super::{IdentityCommon, LocalIdentity};
 
@@ -305,21 +298,22 @@ mod test {
 
     #[test]
     fn create_identity() {
-        let identity = super::Identity::new_local();
-        match identity {
-            super::Identity::Local(_) => (),
-            _ => panic!("Expected local identity"),
-        }
+        init_test();
+        tokio_test::block_on(async {
+            let identity = super::Identity::new_local().await;
+            match identity {
+                super::Identity::Local(_) => (),
+                _ => panic!("Expected local identity"),
+            }
+        })
     }
 
     #[test]
     fn encrypt_decrypt_local() {
+        init_test();
         tokio_test::block_on(async {
-            init_from_seed([0u8; 32]).await;
-        });
-        let identity = super::Identity::new_local();
-        let message = b"Hello, world!";
-        smol::block_on(async {
+            let identity = super::Identity::new_local().await;
+            let message = b"Hello, world!";
             let encrypted = identity.encrypt_for(message).await.unwrap();
             match identity {
                 super::Identity::Local(identity) => {
@@ -333,40 +327,40 @@ mod test {
 
     #[test]
     fn sign_verify_local() {
+        init_test();
         tokio_test::block_on(async {
-            init_from_seed([0u8; 32]).await;
+            let identity = super::Identity::new_local().await;
+            let message = b"Hello, world!";
+            let signature = match &identity {
+                super::Identity::Local(identity) => identity.sign(message).unwrap(),
+                _ => panic!("Expected local identity"),
+            };
+            let _ = identity
+                .verify_from(Box::new(TestSignedMessage {
+                    signed_data: message.to_vec(),
+                    signature: signature.to_vec(),
+                }))
+                .unwrap();
         });
-        let identity = super::Identity::new_local();
-        let message = b"Hello, world!";
-        let signature = match &identity {
-            super::Identity::Local(identity) => identity.sign(message).unwrap(),
-            _ => panic!("Expected local identity"),
-        };
-        let _ = identity
-            .verify_from(Box::new(TestSignedMessage {
-                signed_data: message.to_vec(),
-                signature: signature.to_vec(),
-            }))
-            .unwrap();
     }
 
     #[test]
     fn sign_verify_local_tampering() {
+        init_test();
         tokio_test::block_on(async {
-            init_from_seed([0u8; 32]).await;
+            let identity = super::Identity::new_local().await;
+            let message = b"Hello, world!";
+            let mut signature = match &identity {
+                super::Identity::Local(identity) => identity.sign(message).unwrap(),
+                _ => panic!("Expected local identity"),
+            };
+            signature[0] = signature[0].wrapping_add(128);
+            assert!(identity
+                .verify_from(Box::new(TestSignedMessage {
+                    signed_data: message.to_vec(),
+                    signature: signature.to_vec(),
+                }))
+                .is_err());
         });
-        let identity = super::Identity::new_local();
-        let message = b"Hello, world!";
-        let mut signature = match &identity {
-            super::Identity::Local(identity) => identity.sign(message).unwrap(),
-            _ => panic!("Expected local identity"),
-        };
-        signature[0] = signature[0].wrapping_add(128);
-        assert!(identity
-            .verify_from(Box::new(TestSignedMessage {
-                signed_data: message.to_vec(),
-                signature: signature.to_vec(),
-            }))
-            .is_err());
     }
 }

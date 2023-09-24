@@ -1,3 +1,4 @@
+use log::trace;
 use rand::{RngCore, SeedableRng};
 use rand_chacha::ChaCha20Rng;
 
@@ -20,6 +21,7 @@ pub(crate) async fn random_bytes(bytes: &mut [u8]) {
     let mut rng = RNG.lock().await;
     let rng = rng.as_mut().unwrap();
     rng.fill_bytes(bytes);
+    trace!("random_bytes {:?} {:?}", bytes, rng);
 }
 
 pub async fn init_from_seed(seed: [u8; 32]) {

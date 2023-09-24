@@ -14,10 +14,16 @@ pub enum InterfaceError {
     Unspecified(String),
 }
 
+pub enum ChannelData {
+    Message(Vec<u8>),
+    Close,
+}
+
 pub type InterfaceHandle = [u8; 8];
 
 #[async_trait]
-pub trait Interface: Debug + Send + Sync + Sized {
+pub trait Interface: Clone + Send + Sync + Sized {
     async fn queue_send(&self, message: &[u8]) -> Result<(), InterfaceError>;
-    async fn recv(&self) -> Result<Vec<u8>, InterfaceError>;
+    async fn recv(&self) -> Result<ChannelData, InterfaceError>;
+    async fn close(&self) -> Result<(), InterfaceError>;
 }

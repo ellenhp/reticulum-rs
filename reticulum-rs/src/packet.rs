@@ -9,7 +9,7 @@ use packed_struct::prelude::{PackedStruct, PrimitiveEnum};
 use crate::random::random_bytes;
 use crate::{
     identity::{CryptoError, Identity, IdentityCommon, LocalIdentity},
-    persistence::{destination::Destination, DestinationStore},
+    persistence::{destination::Destination, ReticulumStore},
     NameHash, TruncatedHash,
 };
 
@@ -545,18 +545,13 @@ impl Packet {
         }
     }
 
-    pub(crate) async fn destination<DestStore: DestinationStore + 'static>(
+    pub(crate) async fn destination<Store: ReticulumStore + 'static>(
         &self,
-        #[cfg(feature = "embassy")] destination_store: &embassy_sync::mutex::Mutex<
-            embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
-            Box<DestStore>,
-        >,
-        #[cfg(feature = "tokio")] destination_store: &tokio::sync::Mutex<Box<DestStore>>,
+        reticulum_store: &Store,
     ) -> Option<Destination> {
         match self {
             Packet::Announce(announce) => {
-                let mut store = destination_store.lock().await;
-                store
+                reticulum_store
                     .resolve_destination(announce.destination_name_hash(), announce.identity())
                     .await
             }
@@ -576,14 +571,16 @@ mod test {
         packet::{
             AnnouncePacket, Packet, PacketContextType, PacketType, TransportType, WirePacket,
         },
-        persistence::{destination::Destination, in_memory::InMemoryDestinationStore},
+        persistence::{destination::Destination, in_memory::InMemoryReticulumStore},
+        test::init_test,
     };
 
     #[test]
     fn test_packet() {
-        smol::block_on(async move {
-            let store = Arc::new(Mutex::new(Box::new(InMemoryDestinationStore::new())));
-            let receiver = Identity::new_local();
+        init_test();
+        tokio_test::block_on(async move {
+            let store = Arc::new(Mutex::new(Box::new(InMemoryReticulumStore::new())));
+            let receiver = Identity::new_local().await;
             let destination = Destination::builder("app")
                 .build_single(&receiver, store.lock().await.as_mut())
                 .await
@@ -611,9 +608,10 @@ mod test {
 
     #[test]
     fn test_create_and_parse_announce_packet() {
-        smol::block_on(async move {
-            let store = Arc::new(Mutex::new(Box::new(InMemoryDestinationStore::new())));
-            let identity = Identity::new_local();
+        init_test();
+        tokio_test::block_on(async move {
+            let store = Arc::new(Mutex::new(Box::new(InMemoryReticulumStore::new())));
+            let identity = Identity::new_local().await;
             let destination = Destination::builder("app")
                 .build_single(&identity, store.lock().await.as_mut())
                 .await

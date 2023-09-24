@@ -1,6 +1,7 @@
 #[cfg(test)]
 extern crate std;
 
+use core::time::Duration;
 use std::{
     net::{SocketAddr, UdpSocket},
     sync::Arc,
@@ -9,11 +10,12 @@ use std::{
 use alloc::{boxed::Box, vec::Vec};
 use async_trait::async_trait;
 
-use super::{Interface, InterfaceError};
+use super::{ChannelData, Interface, InterfaceError};
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct UdpInterface {
     socket: Arc<UdpSocket>,
+    active: Arc<tokio::sync::Mutex<bool>>,
     destination: SocketAddr,
 }
 
@@ -26,21 +28,36 @@ impl Interface for UdpInterface {
             .map(|_| ())
     }
 
-    async fn recv(&self) -> Result<Vec<u8>, InterfaceError> {
+    async fn recv(&self) -> Result<ChannelData, InterfaceError> {
+        {
+            if !*self.active.lock().await {
+                return Ok(ChannelData::Close);
+            }
+        }
         let mut buf = [0; 65536];
         let (len, _) = self
             .socket
             .recv_from(&mut buf)
             .map_err(|err| InterfaceError::Recoverable(Box::new(err)))?;
-        Ok(buf[..len].to_vec())
+        Ok(ChannelData::Message(buf[..len].to_vec()))
+    }
+
+    async fn close(&self) -> Result<(), InterfaceError> {
+        *self.active.lock().await = false;
+        Ok(())
     }
 }
 
 impl UdpInterface {
     pub async fn new(local: SocketAddr, destination: SocketAddr) -> Self {
-        let socket = Arc::new(UdpSocket::bind(local).unwrap());
+        let socket = UdpSocket::bind(local).unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_millis(100)))
+            .unwrap();
+        let socket = Arc::new(socket);
         Self {
             socket,
+            active: Arc::new(tokio::sync::Mutex::new(true)),
             destination,
         }
     }
