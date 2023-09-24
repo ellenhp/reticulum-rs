@@ -1,7 +1,5 @@
-#[cfg(all(test, feature = "stores"))]
-pub mod in_memory;
-
 pub mod destination;
+pub mod in_memory;
 
 use core::time::Duration;
 

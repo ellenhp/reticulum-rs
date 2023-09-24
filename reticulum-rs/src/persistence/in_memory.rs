@@ -1,9 +1,3 @@
-#[cfg(test)]
-extern crate std;
-
-use core::cell::{Ref, RefCell};
-use std::{collections::HashMap, sync::Arc};
-
 use alloc::boxed::Box;
 use alloc::format;
 use alloc::{string::String, vec::Vec};
@@ -15,23 +9,45 @@ use crate::NameHash;
 use crate::{identity::IdentityCommon, packet::Packet, TruncatedHash};
 
 use super::destination::DestinationBuilder;
+use super::ReticulumStore;
 use super::{destination::Destination, PersistenceError};
-use super::{AnnounceTableEntry, ReticulumStore};
 
-#[derive(Clone)]
 pub struct InMemoryReticulumStore {
-    destination_names: Arc<tokio::sync::Mutex<Vec<(String, Vec<String>)>>>,
-    destinations: Arc<tokio::sync::Mutex<HashMap<String, Destination>>>,
-    messages: Arc<
-        tokio::sync::Mutex<
-            HashMap<
-                TruncatedHash,
-                (
-                    tokio::sync::mpsc::Sender<Packet>,
-                    Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<Packet>>>,
-                ),
+    #[cfg(feature = "embassy")]
+    destination_names: embassy_sync::mutex::Mutex<
+        embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
+        Vec<(String, Vec<String>)>,
+    >,
+    #[cfg(feature = "tokio")]
+    destination_names: tokio::sync::Mutex<Vec<(String, Vec<String>)>>,
+    #[cfg(feature = "embassy")]
+    destinations: embassy_sync::mutex::Mutex<
+        embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
+        Vec<(String, Destination)>,
+    >,
+    #[cfg(feature = "tokio")]
+    destinations: tokio::sync::Mutex<Vec<(String, Destination)>>,
+    #[cfg(feature = "embassy")]
+    messages: embassy_sync::mutex::Mutex<
+        embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
+        Vec<(
+            TruncatedHash,
+            embassy_sync::channel::Channel<
+                embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
+                Packet,
+                1,
             >,
-        >,
+        )>,
+    >,
+    #[cfg(feature = "tokio")]
+    messages: tokio::sync::Mutex<
+        Vec<(
+            TruncatedHash,
+            (
+                tokio::sync::mpsc::Sender<Packet>,
+                tokio::sync::Mutex<tokio::sync::mpsc::Receiver<Packet>>,
+            ),
+        )>,
     >,
 }
 
@@ -39,11 +55,17 @@ impl InMemoryReticulumStore {
     pub fn new() -> InMemoryReticulumStore {
         InMemoryReticulumStore {
             #[cfg(feature = "embassy")]
-            messages: HashMap::new(),
+            messages: embassy_sync::mutex::Mutex::new(Vec::new()),
             #[cfg(feature = "tokio")]
-            messages: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
-            destination_names: Arc::new(tokio::sync::Mutex::new(Vec::new())),
-            destinations: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            messages: tokio::sync::Mutex::new(Vec::new()),
+            #[cfg(feature = "embassy")]
+            destination_names: embassy_sync::mutex::Mutex::new(Vec::new()),
+            #[cfg(feature = "tokio")]
+            destination_names: tokio::sync::Mutex::new(Vec::new()),
+            #[cfg(feature = "embassy")]
+            destinations: embassy_sync::mutex::Mutex::new(Vec::new()),
+            #[cfg(feature = "tokio")]
+            destinations: tokio::sync::Mutex::new(Vec::new()),
         }
     }
 }
@@ -69,7 +91,7 @@ impl ReticulumStore for InMemoryReticulumStore {
         self.destinations
             .lock()
             .await
-            .insert(destination.full_name(), destination.clone());
+            .push((destination.full_name(), destination.clone()));
         Ok(())
     }
 
@@ -79,7 +101,7 @@ impl ReticulumStore for InMemoryReticulumStore {
 
     async fn get_all_destinations(&self) -> Result<Vec<Destination>, PersistenceError> {
         let mut all_destinations = Vec::new();
-        for destination in self.destinations.lock().await.values() {
+        for (_, destination) in self.destinations.lock().await.iter() {
             all_destinations.push(destination.clone());
         }
         Ok(all_destinations)
@@ -90,7 +112,7 @@ impl ReticulumStore for InMemoryReticulumStore {
         handle: &TruncatedHash,
     ) -> Result<Vec<Destination>, PersistenceError> {
         let mut matching_destinations = Vec::new();
-        for destination in self.destinations.lock().await.values() {
+        for (_, destination) in self.destinations.lock().await.iter() {
             if let Some(identity) = destination.identity() {
                 if &identity.handle() == handle {
                     matching_destinations.push(destination.clone());
@@ -101,16 +123,18 @@ impl ReticulumStore for InMemoryReticulumStore {
     }
 
     async fn add_destination(&self, destination: Destination) -> Result<(), PersistenceError> {
+        let name = destination.full_name();
         if !self
             .destinations
             .lock()
             .await
-            .contains_key(&destination.full_name())
+            .iter()
+            .any(|(key, _)| key == &name)
         {
             self.destinations
                 .lock()
                 .await
-                .insert(destination.full_name(), destination.clone());
+                .push((destination.full_name(), destination.clone()));
         } else {
             trace!("destination already exists: {:?}", destination);
         }
@@ -118,29 +142,37 @@ impl ReticulumStore for InMemoryReticulumStore {
     }
 
     async fn remove_destination(&self, destination: &Destination) -> Result<(), PersistenceError> {
-        self.destinations
-            .lock()
-            .await
-            .remove(&destination.full_name())
-            .ok_or_else(|| {
-                PersistenceError::Unspecified(format!("destination not found: {:?}", destination))
-            })?;
+        let mut destinations = self.destinations.lock().await;
+        *destinations = destinations
+            .iter()
+            .filter(|(_, existing_destination)| {
+                existing_destination.address_hash() != destination.address_hash()
+            })
+            .cloned()
+            .collect();
         Ok(())
     }
     async fn poll_inbox(&self, destination_hash: &TruncatedHash) -> Option<Packet> {
         #[cfg(feature = "embassy")]
-        let (_sender, receiver) = self.messages.get(&destination_hash)?;
-        #[cfg(feature = "embassy")]
-        match receiver.try_receive() {
-            Ok(packet) => Some(packet),
-            // TODO: Do these errors mean we need to do something?
-            Err(_) => None,
+        {
+            let messages = self.messages.lock().await;
+            let (_hash, channel) = messages
+                .iter()
+                .filter(|(hash, _)| hash == destination_hash)
+                .next()?;
+            match channel.try_receive() {
+                Ok(packet) => Some(packet),
+                // TODO: Do these errors mean we need to do something?
+                Err(_) => None,
+            }
         }
-
         #[cfg(feature = "tokio")]
         {
             let mut messages = self.messages.lock().await;
-            let (_sender, receiver) = messages.get_mut(&destination_hash)?;
+            let (_, (_sender, receiver)) = messages
+                .iter_mut()
+                .filter(|(hash, _)| hash == destination_hash)
+                .next()?;
             let retval = match receiver.lock().await.try_recv() {
                 Ok(packet) => Some(packet),
                 Err(_) => None,
@@ -152,13 +184,20 @@ impl ReticulumStore for InMemoryReticulumStore {
     async fn next_inbox(&self, destination_hash: &TruncatedHash) -> Option<Packet> {
         #[cfg(feature = "embassy")]
         {
-            let (_sender, receiver) = self.messages.lock().await.get_mut(&destination_hash)?;
-            return Some(receiver.receive().await);
+            let messages = self.messages.lock().await;
+            let (_hash, channel) = messages
+                .iter()
+                .filter(|(hash, _)| hash == destination_hash)
+                .next()?;
+            return Some(channel.receive().await);
         }
         #[cfg(feature = "tokio")]
         {
             let mut messages = self.messages.lock().await;
-            let (_sender, receiver) = messages.get_mut(&destination_hash)?;
+            let (_, (_sender, receiver)) = messages
+                .iter_mut()
+                .filter(|(hash, _)| hash == destination_hash)
+                .next()?;
             let retval = match receiver.lock().await.try_recv() {
                 Ok(packet) => Some(packet),
                 Err(_) => None,
@@ -260,58 +299,4 @@ impl AsRef<dyn ReticulumStore> for InMemoryReticulumStore {
     fn as_ref(&self) -> &dyn ReticulumStore {
         self
     }
-}
-
-#[derive(Clone)]
-pub struct InMemoryAnnounceTable {
-    #[cfg(feature = "embassy")]
-    announces: Arc<
-        embassy_sync::mutex::Mutex<
-            embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
-            Vec<AnnounceTableEntry>,
-        >,
-    >,
-    #[cfg(feature = "tokio")]
-    announces: Arc<tokio::sync::Mutex<Vec<AnnounceTableEntry>>>,
-}
-
-pub struct InMemoryAnnounceIterator {
-    announces: Vec<AnnounceTableEntry>,
-}
-
-impl Iterator for InMemoryAnnounceIterator {
-    type Item = AnnounceTableEntry;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        self.announces.pop()
-    }
-}
-
-pub struct InMemoryMessageStore {
-    #[cfg(feature = "embassy")]
-    messages: HashMap<
-        TruncatedHash,
-        (
-            embassy_sync::channel::Sender<
-                'static,
-                embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
-                Packet,
-                1,
-            >,
-            embassy_sync::channel::Receiver<
-                'static,
-                embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
-                Packet,
-                1,
-            >,
-        ),
-    >,
-    #[cfg(feature = "tokio")]
-    messages: HashMap<
-        TruncatedHash,
-        (
-            tokio::sync::mpsc::Sender<Packet>,
-            tokio::sync::mpsc::Receiver<Packet>,
-        ),
-    >,
 }
