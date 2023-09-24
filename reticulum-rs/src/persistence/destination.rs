@@ -1,28 +1,25 @@
-use std::{sync::Arc, time::SystemTime, vec};
+#[cfg(test)]
+extern crate std;
 
-use log::debug;
-use sha2::{Digest, Sha256};
-use smol::{
-    channel::{Receiver, Sender},
-    lock::Mutex,
+use alloc::{
+    string::{String, ToString},
+    vec::Vec,
 };
+use defmt::debug;
+use sha2::{Digest, Sha256};
 
 use crate::{
-    identity::{CryptoError, Identity, IdentityCommon},
-    packet::{DestinationType, Packet, PacketError, WirePacket},
-    persistence::DestinationStore,
+    identity::{Identity, IdentityCommon},
+    packet::{DestinationType, PacketError},
+    persistence::ReticulumStore,
     NameHash, TruncatedHash,
 };
 
-#[derive(Debug, PartialEq, thiserror::Error)]
+#[derive(Debug, PartialEq)]
 pub enum DestinationError {
-    #[error("app_name must not be empty")]
     EmptyAppName,
-    #[error("app_name must not contain a dot")]
     DotInAppName,
-    #[error("aspect must not be empty")]
     EmptyAspect,
-    #[error("aspect must not contain a dot")]
     DotInAspect,
 }
 
@@ -41,11 +38,11 @@ enum DestinationInner {
 }
 
 impl Destination {
-    async fn new<DestStore: DestinationStore + 'static>(
+    async fn new<S: ReticulumStore + ?Sized, R: AsRef<S>>(
         app_name: String,
         aspects: Vec<String>,
         inner: DestinationInner,
-        store: &mut DestStore,
+        store: R,
     ) -> Result<Destination, DestinationError> {
         if app_name.is_empty() {
             return Err(DestinationError::EmptyAppName);
@@ -70,12 +67,12 @@ impl Destination {
             Some(Identity::Local(_)) => true,
             _ => false,
         } {
-            if let Err(err) = store.register_local_destination(&dest) {
-                debug!("failed to register local destination: {}", err);
+            if let Err(_err) = store.as_ref().register_local_destination(&dest).await {
+                debug!("failed to register local destination");
             }
         } else {
-            if let Err(err) = store.add_destination(&dest).await {
-                debug!("failed to register non-local destination: {}", err);
+            if let Err(_err) = store.as_ref().add_destination(dest.clone()).await {
+                debug!("failed to register non-local destination");
             }
         }
         Ok(dest)
@@ -151,11 +148,12 @@ impl Destination {
         }
     }
 
-    pub fn encrypt(&self, payload: Vec<u8>) -> Result<Vec<u8>, PacketError> {
+    pub async fn encrypt(&self, payload: Vec<u8>) -> Result<Vec<u8>, PacketError> {
         match &self.inner {
             DestinationInner::Single(single) => single
                 .identity
                 .encrypt_for(&payload)
+                .await
                 .map_err(|err| PacketError::CryptoError(err)),
             DestinationInner::Group(_) => {
                 todo!("implement group destination encryption")
@@ -176,118 +174,6 @@ pub struct GroupDestination {}
 #[derive(Debug, Clone)]
 pub struct PlainDestination {}
 
-#[cfg(test)]
-mod tests {
-    use crate::{identity::IdentityCommon, persistence::in_memory::InMemoryDestinationStore};
-
-    use super::*;
-
-    #[test]
-    fn test_full_name_single() {
-        smol::block_on(async {
-            let mut store = InMemoryDestinationStore::new();
-            let identity = Identity::new_local();
-            let hex_hash = identity.hex_hash();
-            let destination = Destination::builder("app")
-                .aspect("aspect1")
-                .aspect("aspect2")
-                .build_single(&identity, &mut store)
-                .await;
-            assert!(destination.is_ok());
-            let destination = destination.unwrap();
-            assert_eq!(
-                destination.full_name(),
-                format!("app.aspect1.aspect2.{}", hex_hash)
-            );
-        });
-    }
-
-    #[test]
-    fn test_full_name_group() {
-        smol::block_on(async {
-            let mut store = InMemoryDestinationStore::new();
-            let destination = Destination::builder("app")
-                .aspect("aspect1")
-                .aspect("aspect2")
-                .build_group(&mut store)
-                .await;
-            assert!(destination.is_ok());
-            let destination = destination.unwrap();
-            assert_eq!(destination.full_name(), "app.aspect1.aspect2");
-        });
-    }
-
-    #[test]
-    fn test_full_name_plain() {
-        smol::block_on(async {
-            let mut store = InMemoryDestinationStore::new();
-            let destination = Destination::builder("app")
-                .aspect("aspect1")
-                .aspect("aspect2")
-                .build_plain(&mut store)
-                .await;
-            assert!(destination.is_ok());
-            let destination = destination.unwrap();
-            assert_eq!(destination.full_name(), "app.aspect1.aspect2");
-        });
-    }
-
-    #[test]
-    fn test_hex_hash_single() {
-        smol::block_on(async {
-            let mut store = InMemoryDestinationStore::new();
-            let identity = Identity::new_local();
-            let hex_hash = identity.hex_hash();
-            let destination = Destination::builder("app")
-                .aspect("aspect1")
-                .aspect("aspect2")
-                .build_single(&identity, &mut store)
-                .await;
-            assert!(destination.is_ok());
-            let destination = destination.unwrap();
-            assert_eq!(
-                destination.full_name(),
-                format!("app.aspect1.aspect2.{}", hex_hash)
-            );
-            let mut hasher = Sha256::new();
-            hasher.update(destination.full_name().as_bytes());
-            let hash = hasher.finalize();
-            assert_eq!(destination.address_hash().0, &hash[..16]);
-            assert_eq!(destination.hex_hash(), hex::encode(&hash[..16]));
-        });
-    }
-
-    #[test]
-    fn test_dot_in_app_name() {
-        smol::block_on(async {
-            let mut store = InMemoryDestinationStore::new();
-            let identity = Identity::new_local();
-            let destination = Destination::builder("app.name")
-                .aspect("aspect")
-                .build_single(&identity, &mut store)
-                .await;
-            assert!(destination.is_err());
-            let err = destination.unwrap_err();
-            assert_eq!(err, DestinationError::DotInAppName);
-        });
-    }
-
-    #[test]
-    fn test_dot_in_aspect() {
-        smol::block_on(async {
-            let mut store = InMemoryDestinationStore::new();
-            let identity = Identity::new_local();
-            let destination = Destination::builder("app")
-                .aspect("aspect.name")
-                .build_single(&identity, &mut store)
-                .await;
-            assert!(destination.is_err());
-            let err = destination.unwrap_err();
-            assert_eq!(err, DestinationError::DotInAspect);
-        });
-    }
-}
-
 pub struct DestinationBuilder {
     app_name: String,
     aspects: Vec<String>,
@@ -306,10 +192,11 @@ impl DestinationBuilder {
         self
     }
 
-    pub async fn build_single<DestStore: DestinationStore + 'static>(
+    #[cfg(test)]
+    pub async fn build_single<S: ReticulumStore + ?Sized, R: AsRef<S>>(
         self,
         identity: &Identity,
-        store: &mut DestStore,
+        store: R,
     ) -> Result<Destination, DestinationError> {
         Destination::new(
             self.app_name,
@@ -322,9 +209,26 @@ impl DestinationBuilder {
         .await
     }
 
-    pub async fn build_group<DestStore: DestinationStore + 'static>(
+    #[cfg(not(test))]
+    pub async fn build_single<S: ReticulumStore + ?Sized, R: core::convert::AsRef<S>>(
         self,
-        store: &mut DestStore,
+        identity: &Identity,
+        store: R,
+    ) -> Result<Destination, DestinationError> {
+        Destination::new(
+            self.app_name,
+            self.aspects,
+            DestinationInner::Single(SingleDestination {
+                identity: identity.clone(),
+            }),
+            store,
+        )
+        .await
+    }
+
+    pub async fn build_group<S: ReticulumStore + ?Sized, R: AsRef<S>>(
+        self,
+        store: R,
     ) -> Result<Destination, DestinationError> {
         Destination::new(
             self.app_name,
@@ -335,9 +239,9 @@ impl DestinationBuilder {
         .await
     }
 
-    pub async fn build_plain<DestStore: DestinationStore + 'static>(
+    pub async fn build_plain<S: ReticulumStore + ?Sized, R: AsRef<S>>(
         self,
-        store: &mut DestStore,
+        store: R,
     ) -> Result<Destination, DestinationError> {
         Destination::new(
             self.app_name,
@@ -346,5 +250,128 @@ impl DestinationBuilder {
             store,
         )
         .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use alloc::{boxed::Box, format};
+
+    use crate::{
+        identity::IdentityCommon, persistence::in_memory::InMemoryReticulumStore, test::init_test,
+    };
+
+    use super::*;
+
+    #[test]
+    fn test_full_name_single() {
+        init_test();
+        tokio_test::block_on(async {
+            let store: Box<dyn ReticulumStore> = Box::new(InMemoryReticulumStore::new());
+            let identity = Identity::new_local().await;
+            let hex_hash = identity.hex_hash();
+            let destination = Destination::builder("app")
+                .aspect("aspect1")
+                .aspect("aspect2")
+                .build_single(&identity, &store)
+                .await;
+            assert!(destination.is_ok());
+            let destination = destination.unwrap();
+            assert_eq!(
+                destination.full_name(),
+                format!("app.aspect1.aspect2.{}", hex_hash)
+            );
+        });
+    }
+
+    #[test]
+    fn test_full_name_group() {
+        init_test();
+        tokio_test::block_on(async {
+            let store: Box<dyn ReticulumStore> = Box::new(InMemoryReticulumStore::new());
+            let destination = Destination::builder("app")
+                .aspect("aspect1")
+                .aspect("aspect2")
+                .build_group(&store)
+                .await;
+            assert!(destination.is_ok());
+            let destination = destination.unwrap();
+            assert_eq!(destination.full_name(), "app.aspect1.aspect2");
+        });
+    }
+
+    #[test]
+    fn test_full_name_plain() {
+        init_test();
+        tokio_test::block_on(async {
+            let store: Box<dyn ReticulumStore> = Box::new(InMemoryReticulumStore::new());
+            let destination = Destination::builder("app")
+                .aspect("aspect1")
+                .aspect("aspect2")
+                .build_plain(&store)
+                .await;
+            assert!(destination.is_ok());
+            let destination = destination.unwrap();
+            assert_eq!(destination.full_name(), "app.aspect1.aspect2");
+        });
+    }
+
+    #[test]
+    fn test_hex_hash_single() {
+        init_test();
+        tokio_test::block_on(async {
+            let store: Box<dyn ReticulumStore> = Box::new(InMemoryReticulumStore::new());
+            let identity = Identity::new_local().await;
+            let hex_hash = identity.hex_hash();
+            let destination = Destination::builder("app")
+                .aspect("aspect1")
+                .aspect("aspect2")
+                .build_single(&identity, &store)
+                .await;
+            assert!(destination.is_ok());
+            let destination = destination.unwrap();
+            assert_eq!(
+                destination.full_name(),
+                format!("app.aspect1.aspect2.{}", hex_hash)
+            );
+            let mut hasher = Sha256::new();
+            hasher.update(destination.name_hash().0);
+            hasher.update(identity.truncated_hash());
+            let hash = hasher.finalize();
+            assert_eq!(destination.address_hash().0, &hash[..16]);
+            assert_eq!(destination.hex_hash(), hex::encode(&hash[..16]));
+        });
+    }
+
+    #[test]
+    fn test_dot_in_app_name() {
+        init_test();
+        tokio_test::block_on(async {
+            let store: Box<dyn ReticulumStore> = Box::new(InMemoryReticulumStore::new());
+            let identity = Identity::new_local().await;
+            let destination = Destination::builder("app.name")
+                .aspect("aspect")
+                .build_single(&identity, &store)
+                .await;
+            assert!(destination.is_err());
+            let err = destination.unwrap_err();
+            assert_eq!(err, DestinationError::DotInAppName);
+        });
+    }
+
+    #[test]
+    fn test_dot_in_aspect() {
+        init_test();
+        tokio_test::block_on(async {
+            let store: Box<dyn ReticulumStore> = Box::new(InMemoryReticulumStore::new());
+            let identity = Identity::new_local().await;
+            let destination = Destination::builder("app")
+                .aspect("aspect.name")
+                .build_single(&identity, &store)
+                .await;
+            assert!(destination.is_err());
+            let err = destination.unwrap_err();
+            assert_eq!(err, DestinationError::DotInAspect);
+        });
     }
 }

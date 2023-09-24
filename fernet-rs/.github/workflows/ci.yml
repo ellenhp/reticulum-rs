@@ -1,0 +1,52 @@
+on: [pull_request, push]
+
+name: CI
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        RUST:
+          - stable
+          - beta
+          - nightly
+        features:
+          - "--features default"
+          - "--no-default-features --features rustcrypto"
+    steps:
+      - uses: actions/checkout@v2.3.4
+      - uses: actions-rs/toolchain@v1                                                                                      
+        with:                                                                                                              
+          profile: minimal                                                                                                 
+          toolchain: ${{ matrix.RUST }}                                                                                    
+          override: true                                                                                                   
+          components: rustfmt, clippy                                                                                      
+                                                                                                                           
+      - uses: actions-rs/cargo@v1
+        with:
+          command: build
+          args: ${{ matrix.features }}
+
+      - uses: actions-rs/cargo@v1
+        with:
+          command: test
+
+      - uses: actions-rs/cargo@v1
+        with:
+          command: test
+          args: ${{ matrix.features }}
+
+      - uses: actions-rs/cargo@v1
+        with:
+          command: fmt
+          args: --all -- --check
+
+      - uses: actions-rs/cargo@v1
+        with:
+          command: clippy
+          args: -- -D warnings
+
+      - uses: actions-rs/audit-check@v1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
