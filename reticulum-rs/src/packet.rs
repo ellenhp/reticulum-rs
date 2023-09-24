@@ -545,9 +545,9 @@ impl Packet {
         }
     }
 
-    pub(crate) async fn destination<Store: ReticulumStore + 'static>(
+    pub(crate) async fn destination(
         &self,
-        reticulum_store: &Store,
+        reticulum_store: &Box<dyn ReticulumStore>,
     ) -> Option<Destination> {
         match self {
             Packet::Announce(announce) => {
@@ -582,7 +582,7 @@ mod test {
             let store = Arc::new(Mutex::new(Box::new(InMemoryReticulumStore::new())));
             let receiver = Identity::new_local().await;
             let destination = Destination::builder("app")
-                .build_single(&receiver, store.lock().await.as_mut())
+                .build_single(&receiver, store.lock().await.as_ref())
                 .await
                 .unwrap();
             let packet = WirePacket::new_without_transport(

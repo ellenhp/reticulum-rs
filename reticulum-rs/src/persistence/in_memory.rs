@@ -1,16 +1,20 @@
 #[cfg(test)]
 extern crate std;
 
+use core::cell::{Ref, RefCell};
 use std::{collections::HashMap, sync::Arc};
 
 use alloc::boxed::Box;
 use alloc::format;
 use alloc::{string::String, vec::Vec};
 use async_trait::async_trait;
-use log::trace;
+use log::{trace, warn};
 
+use crate::identity::Identity;
+use crate::NameHash;
 use crate::{identity::IdentityCommon, packet::Packet, TruncatedHash};
 
+use super::destination::DestinationBuilder;
 use super::{destination::Destination, PersistenceError};
 use super::{AnnounceTableEntry, ReticulumStore};
 
@@ -18,25 +22,6 @@ use super::{AnnounceTableEntry, ReticulumStore};
 pub struct InMemoryReticulumStore {
     destination_names: Arc<tokio::sync::Mutex<Vec<(String, Vec<String>)>>>,
     destinations: Arc<tokio::sync::Mutex<HashMap<String, Destination>>>,
-    #[cfg(feature = "embassy")]
-    messages: HashMap<
-        TruncatedHash,
-        (
-            embassy_sync::channel::Sender<
-                'static,
-                embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
-                Packet,
-                1,
-            >,
-            embassy_sync::channel::Receiver<
-                'static,
-                embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
-                Packet,
-                1,
-            >,
-        ),
-    >,
-    #[cfg(feature = "tokio")]
     messages: Arc<
         tokio::sync::Mutex<
             HashMap<
@@ -180,6 +165,100 @@ impl ReticulumStore for InMemoryReticulumStore {
             };
             return retval;
         }
+    }
+
+    async fn get_local_destinations(&self) -> Result<Vec<Destination>, PersistenceError> {
+        let all_destinations = self.get_all_destinations().await?;
+        let mut local_destinations = Vec::new();
+        for destination in all_destinations {
+            if let Some(Identity::Local(_)) = destination.identity() {
+                local_destinations.push(destination);
+            }
+        }
+        Ok(local_destinations)
+    }
+    async fn get_peer_destinations(&self) -> Result<Vec<Destination>, PersistenceError> {
+        let all_destinations = self.get_all_destinations().await?;
+        let mut peer_destinations = Vec::new();
+        for destination in all_destinations {
+            if let Some(Identity::Peer(_)) = destination.identity() {
+                peer_destinations.push(destination);
+            }
+        }
+        Ok(peer_destinations)
+    }
+    fn destination_builder(&self, app_name: &str) -> DestinationBuilder {
+        Destination::builder(app_name)
+    }
+    async fn resolve_destination(
+        &self,
+        hash: &NameHash,
+        identity: &Identity,
+    ) -> Option<Destination> {
+        if let Ok(Some(destination)) = self.get_destination(hash).await {
+            if destination.name_hash() == *hash {
+                return Some(destination);
+            }
+        }
+        let destination_names = if let Ok(names) = self.get_destination_names().await {
+            names
+        } else {
+            warn!("error getting destination names");
+            return None;
+        };
+        for (app_name, aspects) in destination_names {
+            let mut builder = Destination::builder(app_name.as_str());
+            for aspect in aspects {
+                builder = builder.aspect(aspect.as_str());
+            }
+            let destination = if let Ok(destination) =
+                builder.build_single(identity, self).await.map_err(|err| {
+                    PersistenceError::Unspecified(format!("error building destination: {:?}", err))
+                }) {
+                destination
+            } else {
+                warn!("error building destination");
+                return None;
+            };
+            if destination.name_hash() == *hash {
+                self.add_destination(destination.clone()).await.unwrap();
+                return Some(destination);
+            }
+        }
+        None
+    }
+
+    async fn get_destinations_by_name(
+        &self,
+        name: &str,
+    ) -> Result<Vec<Destination>, PersistenceError> {
+        let all_destinations = self.get_all_destinations().await?;
+        let mut matching_destinations = Vec::new();
+        for destination in all_destinations {
+            if destination.full_name() == name {
+                matching_destinations.push(destination);
+            }
+        }
+        Ok(matching_destinations)
+    }
+
+    async fn get_destination(
+        &self,
+        hash: &NameHash,
+    ) -> Result<Option<Destination>, PersistenceError> {
+        let all_destinations = self.get_all_destinations().await?;
+        for existing_destination in all_destinations {
+            if &existing_destination.name_hash() == hash {
+                return Ok(Some(existing_destination));
+            }
+        }
+        Ok(None)
+    }
+}
+
+impl AsRef<dyn ReticulumStore> for InMemoryReticulumStore {
+    fn as_ref(&self) -> &dyn ReticulumStore {
+        self
     }
 }
 

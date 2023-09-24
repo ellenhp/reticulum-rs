@@ -14,6 +14,8 @@ async fn main(_spawner: Spawner) {
     let p = embassy_rp::init(Default::default());
     let mut led = Output::new(p.PIN_25, Level::Low);
 
+    // reticulum_rs::Reticulum::new_from_channel(&[], reticulum_store, channel, spawner);
+
     loop {
         info!("led on!");
         led.set_high();

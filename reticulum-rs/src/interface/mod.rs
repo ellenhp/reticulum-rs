@@ -22,7 +22,7 @@ pub enum ChannelData {
 pub type InterfaceHandle = [u8; 8];
 
 #[async_trait]
-pub trait Interface: Clone + Send + Sync + Sized {
+pub trait Interface: Send + Sync {
     async fn queue_send(&self, message: &[u8]) -> Result<(), InterfaceError>;
     async fn recv(&self) -> Result<ChannelData, InterfaceError>;
     async fn close(&self) -> Result<(), InterfaceError>;
