@@ -3,8 +3,12 @@ use core::error::Error;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::{boxed::Box, vec::Vec};
-use defmt::warn;
 use packed_struct::prelude::{PackedStruct, PrimitiveEnum};
+
+#[cfg(feature = "embassy")]
+use defmt::*;
+#[cfg(feature = "tokio")]
+use log::*;
 
 use crate::random::random_bytes;
 use crate::{
@@ -213,7 +217,6 @@ impl WirePacket {
             header_common: header_common.clone(),
             header_variable,
         };
-        debug_assert!(!Self::should_encrypt_payload(&header_common, &header));
         WirePacket {
             header_common: header_common.clone(),
             header,
@@ -531,6 +534,41 @@ impl AnnouncePacket {
     }
 }
 
+pub struct MessagePacket {
+    pub wire_packet: WirePacket,
+}
+
+impl MessagePacket {
+    pub async fn new(
+        destination: &Destination,
+        context_type: PacketContextType,
+        payload: Vec<u8>,
+    ) -> Result<MessagePacket, PacketError> {
+        let wire_packet = WirePacket::new_without_transport(
+            PacketType::Data,
+            context_type,
+            TransportType::Broadcast,
+            destination,
+            payload,
+        )
+        .await?;
+        Ok(MessagePacket { wire_packet })
+    }
+
+    pub fn wire_packet(&self) -> &WirePacket {
+        &self.wire_packet
+    }
+
+    pub fn decrypt_payload(&self, identity: &Identity) -> Result<Vec<u8>, CryptoError> {
+        if let Identity::Local(local) = identity {
+            return local
+                .decrypt(&self.wire_packet.payload)
+                .map_err(|err| CryptoError::DecryptFailed);
+        }
+        Err(CryptoError::InvalidKey)
+    }
+}
+
 #[derive(Clone)]
 pub enum Packet {
     Announce(AnnouncePacket),
@@ -564,7 +602,7 @@ impl Packet {
 mod test {
 
     use alloc::{boxed::Box, sync::Arc, vec::Vec};
-    use smol::lock::Mutex;
+    use tokio::sync::Mutex;
 
     use crate::{
         identity::{Identity, IdentityCommon, LocalIdentity},

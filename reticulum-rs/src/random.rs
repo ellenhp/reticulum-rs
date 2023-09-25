@@ -1,4 +1,8 @@
-use defmt::trace;
+#[cfg(feature = "embassy")]
+use defmt::*;
+#[cfg(feature = "tokio")]
+use log::*;
+
 use rand::{RngCore, SeedableRng};
 use rand_chacha::ChaCha20Rng;
 
