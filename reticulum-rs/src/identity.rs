@@ -2,11 +2,17 @@ use core::fmt::Debug;
 
 use alloc::{boxed::Box, string::String, vec::Vec};
 use async_trait::async_trait;
-use base64::Engine;
 use ed25519_dalek::{Signer, Verifier};
 use hkdf::Hkdf;
 use sha2::{Digest, Sha256};
 use x25519_dalek::PublicKey;
+
+#[allow(unused_imports)]
+#[cfg(feature = "embassy")]
+use defmt::{debug, error, info, trace, warn};
+#[allow(unused_imports)]
+#[cfg(feature = "tokio")]
+use log::{debug, error, info, trace, warn};
 
 use crate::{
     packet::SignedMessage,
@@ -61,18 +67,16 @@ impl IdentityCommon for PeerIdentityInner {
         let ikm = shared_secret.as_bytes();
         let hkdf = Hkdf::<Sha256>::new(Some(&salt), ikm);
         let mut okm = [0u8; 32];
+
         hkdf.expand(&[], &mut okm).unwrap();
 
-        let base64_key = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(okm);
-        if let Some(fernet_key) = fernet::Fernet::new(&base64_key) {
+        if let Some(fernet_key) = fernet::Fernet::new(&okm) {
             let message = fernet_key.encrypt(message);
-            if let Ok(bytes) = base64::engine::general_purpose::URL_SAFE.decode(message) {
-                let ephemeral_pubkey = ephemeral_pubkey.as_bytes();
-                assert_eq!(ephemeral_pubkey.len(), 32);
-                Ok([ephemeral_pubkey, bytes.as_slice()].concat())
-            } else {
-                Err(CryptoError::EncryptFailed)
-            }
+            let ephemeral_pubkey = ephemeral_pubkey.as_bytes();
+            debug_assert_eq!(ephemeral_pubkey.len(), 32);
+            trace!("ephemeral_pubkey {:?}", ephemeral_pubkey);
+            trace!("fernet token {:?}", message.len());
+            Ok([ephemeral_pubkey, message.as_slice()].concat())
         } else {
             Err(CryptoError::InvalidKey)
         }
@@ -160,11 +164,8 @@ impl LocalIdentity for LocalIdentityInner {
         let mut okm = [0u8; 32];
         hkdf.expand(&[], &mut okm).unwrap();
 
-        let base64_key = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(okm);
-        let message_ciphertext_base64 =
-            base64::engine::general_purpose::URL_SAFE.encode(message_ciphertext);
-        if let Some(fernet_key) = fernet::Fernet::new(&base64_key) {
-            let message_cleartext = fernet_key.decrypt(&message_ciphertext_base64).unwrap();
+        if let Some(fernet_key) = fernet::Fernet::new(&okm) {
+            let message_cleartext = fernet_key.decrypt(message_ciphertext).unwrap();
             Ok(message_cleartext)
         } else {
             Err(CryptoError::InvalidKey)

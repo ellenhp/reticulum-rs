@@ -7,10 +7,12 @@ extern crate alloc;
 
 use core::error::Error;
 
+#[allow(unused_imports)]
 #[cfg(feature = "embassy")]
-use defmt::*;
+use defmt::{debug, error, info, trace, warn};
+#[allow(unused_imports)]
 #[cfg(feature = "tokio")]
-use log::*;
+use log::{debug, error, info, trace, warn};
 
 use alloc::{boxed::Box, string::String, vec::Vec};
 pub use fernet;

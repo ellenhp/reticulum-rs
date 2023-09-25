@@ -1,7 +1,9 @@
+#[allow(unused_imports)]
 #[cfg(feature = "embassy")]
-use defmt::*;
+use defmt::{debug, error, info, trace, warn};
+#[allow(unused_imports)]
 #[cfg(feature = "tokio")]
-use log::*;
+use log::{debug, error, info, trace, warn};
 
 use rand::{RngCore, SeedableRng};
 use rand_chacha::ChaCha20Rng;

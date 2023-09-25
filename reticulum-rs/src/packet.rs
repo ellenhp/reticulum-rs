@@ -5,10 +5,12 @@ use alloc::string::{String, ToString};
 use alloc::{boxed::Box, vec::Vec};
 use packed_struct::prelude::{PackedStruct, PrimitiveEnum};
 
+#[allow(unused_imports)]
 #[cfg(feature = "embassy")]
-use defmt::*;
+use defmt::{debug, error, info, trace, warn};
+#[allow(unused_imports)]
 #[cfg(feature = "tokio")]
-use log::*;
+use log::{debug, error, info, trace, warn};
 
 use crate::random::random_bytes;
 use crate::{
@@ -239,7 +241,11 @@ impl WirePacket {
             hops: 0,
         };
         let header_variable = PacketHeaderVariable::Header1(PacketHeader1 {
-            destination_hash: destination.address_hash().0,
+            destination_hash: if packet_type == PacketType::Announce {
+                destination.address_hash_old().0
+            } else {
+                destination.address_hash().0
+            },
             context_type,
         });
         let header = PacketHeader {
@@ -483,7 +489,7 @@ impl AnnouncePacket {
         random_bytes(&mut random_hash_bytes).await;
         let random_hash = NameHash(random_hash_bytes); // TODO: Include time? That's what the reference implementation does.
         let mut signature_material = [0u8; 164].to_vec();
-        signature_material[0..16].copy_from_slice(&destination.address_hash().0);
+        signature_material[0..16].copy_from_slice(&destination.address_hash_old().0);
         signature_material[16..80].copy_from_slice(&identity.wire_repr());
         signature_material[80..90].copy_from_slice(&destination_name_hash.0);
         signature_material[90..100].copy_from_slice(&random_hash.0);
