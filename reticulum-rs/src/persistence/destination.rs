@@ -1,11 +1,17 @@
 #[cfg(test)]
 extern crate std;
 
+#[allow(unused_imports)]
+#[cfg(feature = "embassy")]
+use defmt::{debug, error, info, trace, warn};
+#[allow(unused_imports)]
+#[cfg(feature = "tokio")]
+use log::{debug, error, info, trace, warn};
+
 use alloc::{
     string::{String, ToString},
     vec::Vec,
 };
-use defmt::debug;
 use sha2::{Digest, Sha256};
 
 use crate::{
@@ -98,23 +104,70 @@ impl Destination {
     }
 
     /// Returns the full name of the destination according to the Reticulum spec.
+    pub fn partial_name(&self) -> String {
+        let aspects = self.aspects.clone();
+        let name = [&[self.app_name.clone()], aspects.as_slice()]
+            .concat()
+            .join(".");
+        //     name.as_str(),
+        //     hex::encode(&hash).as_str()
+        // );
+        name
+    }
+
+    /// Returns the full name of the destination according to the Reticulum spec.
     pub fn full_name(&self) -> String {
         let mut aspects = self.aspects.clone();
         // For single destinations the spec requires that we include the identity hash as an aspect.
         if let DestinationInner::Single(single) = &self.inner {
             aspects.push(single.identity.hex_hash())
         }
-        [&[self.app_name.clone()], aspects.as_slice()]
+        let name = [&[self.app_name.clone()], aspects.as_slice()]
             .concat()
-            .join(".")
+            .join(".");
+        // info!(
+        //     "full name: {}, {}",
+        //     name.as_str(),
+        //     hex::encode(&hash).as_str()
+        // );
+        name
+    }
+
+    /// Returns the truncated hash of this destination according to the Reticulum spec.
+    pub fn address_hash_old(&self) -> TruncatedHash {
+        let mut hasher = Sha256::new();
+        hasher.update(self.name_hash().0);
+        if let Some(identity) = self.identity() {
+            // info!(
+            //     "identity: {:?}",
+            //     hex::encode(identity.truncated_hash()).as_str()
+            // );
+            hasher.update(identity.truncated_hash());
+        } else {
+            info!("no identity");
+        }
+        TruncatedHash(
+            hasher.finalize()[..16]
+                .try_into()
+                .expect("slice operation must produce 16 bytes"),
+        )
     }
 
     /// Returns the truncated hash of this destination according to the Reticulum spec.
     pub fn address_hash(&self) -> TruncatedHash {
         let mut hasher = Sha256::new();
-        hasher.update(self.name_hash().0);
+        hasher.update(self.partial_name().as_bytes());
+        let name_hash = hasher.finalize();
+        hasher = Sha256::new();
+        hasher.update(name_hash[..10].as_ref());
         if let Some(identity) = self.identity() {
+            // info!(
+            //     "identity: {:?}",
+            //     hex::encode(identity.truncated_hash()).as_str()
+            // );
             hasher.update(identity.truncated_hash());
+        } else {
+            info!("no identity");
         }
         TruncatedHash(
             hasher.finalize()[..16]
@@ -156,7 +209,7 @@ impl Destination {
                 .await
                 .map_err(|err| PacketError::CryptoError(err)),
             DestinationInner::Group(_) => {
-                todo!("implement group destination encryption")
+                core::todo!("implement group destination encryption")
             }
             DestinationInner::Plain(_) => Ok(payload),
         }

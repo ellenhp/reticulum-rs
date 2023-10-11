@@ -7,14 +7,21 @@ extern crate alloc;
 
 use core::error::Error;
 
+#[allow(unused_imports)]
+#[cfg(feature = "embassy")]
+use defmt::{debug, error, info, trace, warn};
+#[allow(unused_imports)]
+#[cfg(feature = "tokio")]
+use log::{debug, error, info, trace, warn};
+
 use alloc::{boxed::Box, string::String, vec::Vec};
-use defmt::{debug, trace};
 pub use fernet;
 use identity::Identity;
 use packet::{AnnouncePacket, Packet, PacketContextType, PacketError, WirePacket};
 use persistence::{destination::Destination, PersistenceError, ReticulumStore};
+use sha2::{Digest, Sha256};
 
-use crate::packet::PacketHeaderVariable;
+use crate::{identity::IdentityCommon, packet::PacketHeaderVariable};
 
 pub mod constants;
 pub mod identity;
@@ -38,10 +45,10 @@ pub enum TransportError {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct TruncatedHash([u8; 16]);
+pub struct TruncatedHash(pub [u8; 16]);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct NameHash([u8; 10]);
+pub struct NameHash(pub [u8; 10]);
 
 pub enum PacketChannelData {
     Packet(WirePacket),
@@ -70,15 +77,33 @@ pub type PacketSender = tokio::sync::mpsc::Sender<PacketChannelData>;
 #[cfg(feature = "tokio")]
 pub type PacketReceiver = tokio::sync::mpsc::Receiver<PacketChannelData>;
 
+#[derive(Clone)]
 pub struct Reticulum<'a> {
+    #[cfg(feature = "embassy")]
     reticulum_store: &'a Box<dyn ReticulumStore>,
+    #[cfg(feature = "tokio")]
+    reticulum_store: alloc::sync::Arc<Box<dyn ReticulumStore>>,
+    _phantom: core::marker::PhantomData<&'a ()>,
 }
 
 impl<'a> Reticulum<'a> {
+    #[cfg(feature = "embassy")]
     pub fn new(
         reticulum_store: &'a Box<dyn ReticulumStore>,
     ) -> Result<Reticulum<'a>, ReticulumError> {
-        return Ok(Reticulum { reticulum_store });
+        return Ok(Reticulum {
+            reticulum_store,
+            _phantom: core::marker::PhantomData,
+        });
+    }
+    #[cfg(feature = "tokio")]
+    pub fn new(
+        reticulum_store: alloc::sync::Arc<Box<dyn ReticulumStore>>,
+    ) -> Result<Reticulum<'a>, ReticulumError> {
+        return Ok(Reticulum {
+            reticulum_store,
+            _phantom: core::marker::PhantomData,
+        });
     }
 
     pub async fn get_known_destinations(&self) -> Vec<Destination> {
@@ -156,7 +181,16 @@ impl<'a> Reticulum<'a> {
             crate::packet::Packet::Announce(announce_packet) => {
                 // Add to the identity store and announce table.
                 let identity = announce_packet.identity();
-                trace!("Resolving destination");
+                trace!(
+                    "name then identity truncated hashes (real) {:?}\n{:?}",
+                    hex::encode(announce_packet.destination_name_hash().0),
+                    hex::encode(identity.truncated_hash())
+                );
+                let mut hasher = sha2::Sha256::new();
+                hasher.update(announce_packet.destination_name_hash().0);
+                hasher.update(identity.truncated_hash());
+                let destination_hash = hasher.finalize();
+                trace!("Destination hash: {:?}", hex::encode(destination_hash));
                 let resolved_destination = {
                     let resolved_destination = reticulum_store
                         .resolve_destination(&announce_packet.destination_name_hash(), identity);
@@ -175,7 +209,7 @@ impl<'a> Reticulum<'a> {
                     trace!("Failed to resolve destination");
                 }
             }
-            crate::packet::Packet::Other(_) => todo!(),
+            crate::packet::Packet::Other(_) => {}
         }
     }
 
@@ -246,7 +280,7 @@ mod test {
         },
         Reticulum,
     };
-    use alloc::{boxed::Box, string::ToString, vec::Vec};
+    use alloc::{boxed::Box, string::ToString, sync::Arc, vec::Vec};
     use rand::Rng;
     use rand_chacha::rand_core::OsRng;
 
@@ -260,20 +294,20 @@ mod test {
         });
     }
 
-    async fn create_node<'a>(store: &'a Box<dyn ReticulumStore>) -> Reticulum<'a> {
+    async fn create_node<'a>(store: Arc<Box<dyn ReticulumStore>>) -> Reticulum<'a> {
         store
             .register_destination_name("app".to_string(), Vec::new())
             .await
             .unwrap();
 
-        let node = Reticulum::new(&store).unwrap();
+        let node = Reticulum::new(store).unwrap();
         node
     }
 
     async fn setup_node<'a>(node: &'a Reticulum<'a>) -> Destination {
         let builder = node.reticulum_store.destination_builder("app");
         let destination = builder
-            .build_single(&Identity::new_local().await, &node.reticulum_store)
+            .build_single(&Identity::new_local().await, node.reticulum_store.as_ref())
             .await
             .unwrap();
         destination
@@ -283,10 +317,12 @@ mod test {
     fn test_announce() {
         init_test();
         tokio_test::block_on(async {
-            let store1: Box<dyn ReticulumStore> = Box::new(InMemoryReticulumStore::new());
-            let store2: Box<dyn ReticulumStore> = Box::new(InMemoryReticulumStore::new());
-            let reticulum1 = create_node(&store1).await;
-            let reticulum2 = create_node(&store2).await;
+            let store1: Arc<Box<dyn ReticulumStore>> =
+                Arc::new(Box::new(InMemoryReticulumStore::new()));
+            let store2: Arc<Box<dyn ReticulumStore>> =
+                Arc::new(Box::new(InMemoryReticulumStore::new()));
+            let reticulum1 = create_node(store1.clone()).await;
+            let reticulum2 = create_node(store2.clone()).await;
             let node1 = &reticulum1;
             let node2 = &reticulum2;
             let _destination1 = setup_node(&node1).await;
@@ -307,10 +343,12 @@ mod test {
     fn test_announce_bidirectional() {
         init_test();
         tokio_test::block_on(async {
-            let store1: Box<dyn ReticulumStore> = Box::new(InMemoryReticulumStore::new());
-            let store2: Box<dyn ReticulumStore> = Box::new(InMemoryReticulumStore::new());
-            let reticulum1 = create_node(&store1).await;
-            let reticulum2 = create_node(&store2).await;
+            let store1: Arc<Box<dyn ReticulumStore>> =
+                Arc::new(Box::new(InMemoryReticulumStore::new()));
+            let store2: Arc<Box<dyn ReticulumStore>> =
+                Arc::new(Box::new(InMemoryReticulumStore::new()));
+            let reticulum1 = create_node(store1.clone()).await;
+            let reticulum2 = create_node(store2.clone()).await;
             let node1 = &reticulum1;
             let node2 = &reticulum2;
             let _destination1 = setup_node(&node1).await;
@@ -327,6 +365,32 @@ mod test {
             tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
             assert_eq!(node1.get_known_destinations().await.len(), 2);
             assert_eq!(node2.get_known_destinations().await.len(), 2);
+        })
+    }
+
+    #[test]
+    fn test_encrypted_packet() {
+        init_test();
+        tokio_test::block_on(async {
+            let store1: Arc<Box<dyn ReticulumStore>> =
+                Arc::new(Box::new(InMemoryReticulumStore::new()));
+            let store2: Arc<Box<dyn ReticulumStore>> =
+                Arc::new(Box::new(InMemoryReticulumStore::new()));
+            let reticulum1 = create_node(store1.clone()).await;
+            let reticulum2 = create_node(store2.clone()).await;
+            let node1 = &reticulum1;
+            let node2 = &reticulum2;
+            let _destination1 = setup_node(&node1).await;
+            let _destination2 = setup_node(&node2).await;
+
+            assert_eq!(node1.get_local_destinations().await.len(), 1);
+            assert_eq!(node2.get_local_destinations().await.len(), 1);
+            for packet in node1.announce_local_destinations().await.unwrap() {
+                node2.process_packet(packet).await.unwrap();
+            }
+            for packet in node2.announce_local_destinations().await.unwrap() {
+                node1.process_packet(packet).await.unwrap();
+            }
         })
     }
 }

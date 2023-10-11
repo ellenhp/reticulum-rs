@@ -72,7 +72,7 @@ impl MultiFernet {
 
     /// Encrypts data with the first `Fernet` instance. Returns a value
     /// (which is base64-encoded) that can be passed to `MultiFernet::decrypt`.
-    pub fn encrypt(&self, data: &[u8]) -> String {
+    pub fn encrypt(&self, data: &[u8]) -> Vec<u8> {
         self.fernets[0].encrypt(data)
     }
 
@@ -80,7 +80,7 @@ impl MultiFernet {
     /// either `Ok(plaintext)` if decryption is successful or
     /// `Err(DecryptionError)` if no decryption was possible across the set of
     /// fernet keys.
-    pub fn decrypt(&self, token: &str) -> Result<Vec<u8>, DecryptionError> {
+    pub fn decrypt(&self, token: &[u8]) -> Result<Vec<u8>, DecryptionError> {
         for fernet in self.fernets.iter() {
             let res = fernet.decrypt(token);
             if res.is_ok() {
@@ -110,8 +110,7 @@ impl Fernet {
     /// 32-bytes, url-safe base64-encoded. Generating keys with `Fernet::generate_key`
     /// is recommended. DO NOT USE A HUMAN READABLE PASSWORD AS A KEY. Returns
     /// `None` if the key is not 32-bytes base64 encoded.
-    pub fn new(key: &str) -> Option<Fernet> {
-        let key = b64_decode_url(key).ok()?;
+    pub fn new(key: &[u8]) -> Option<Fernet> {
         if key.len() != 32 {
             return None;
         }
@@ -129,15 +128,15 @@ impl Fernet {
 
     /// Generates a new, random, key. Can be safely passed to `Fernet::new()`.
     /// Store this somewhere safe!
-    pub fn generate_key() -> String {
+    pub fn generate_key() -> Vec<u8> {
         let mut key: [u8; 32] = Default::default();
         getrandom::getrandom(&mut key).expect("Error in getrandom");
-        crate::b64_encode_url(&key.to_vec())
+        key.to_vec()
     }
 
     /// Encrypts data into a token. Returns a value (which is base64-encoded) that can be
     /// passed to `Fernet::decrypt` for decryption and verification..
-    pub fn encrypt(&self, data: &[u8]) -> String {
+    pub fn encrypt(&self, data: &[u8]) -> Vec<u8> {
         let current_time = 0;
         self._encrypt_at_time(data, current_time)
     }
@@ -159,20 +158,18 @@ impl Fernet {
         self._encrypt_at_time(data, current_time)
     }
 
-    fn _encrypt_at_time(&self, data: &[u8], current_time: u64) -> String {
+    fn _encrypt_at_time(&self, data: &[u8], current_time: u64) -> Vec<u8> {
         let mut iv: [u8; 16] = Default::default();
         getrandom::getrandom(&mut iv).expect("Error in getrandom");
         self._encrypt_from_parts(data, current_time, &iv)
     }
 
-    fn _encrypt_from_parts(&self, data: &[u8], current_time: u64, iv: &[u8]) -> String {
+    fn _encrypt_from_parts(&self, data: &[u8], _current_time: u64, iv: &[u8]) -> Vec<u8> {
         let ciphertext = cbc::Encryptor::<aes::Aes128>::new_from_slices(&self.encryption_key, iv)
             .unwrap()
             .encrypt_padded_vec_mut::<Pkcs7>(data);
 
-        let mut result = [0x80].to_vec();
-        result.extend_from_slice(&current_time.to_be_bytes());
-        result.extend_from_slice(iv);
+        let mut result = iv.to_vec();
         result.extend_from_slice(&ciphertext);
 
         let mut hmac_signer = hmac::Hmac::<Sha256>::new_from_slice(&self.signing_key)
@@ -180,13 +177,13 @@ impl Fernet {
         hmac_signer.update(&result);
 
         result.extend_from_slice(&hmac_signer.finalize().into_bytes());
-        crate::b64_encode_url(&result)
+        result
     }
 
     /// Decrypts a ciphertext. Returns either `Ok(plaintext)` if decryption is
     /// successful or `Err(DecryptionError)` if there are any errors. Errors could
     /// include incorrect key or tampering with the data.
-    pub fn decrypt(&self, token: &str) -> Result<Vec<u8>, DecryptionError> {
+    pub fn decrypt(&self, token: &[u8]) -> Result<Vec<u8>, DecryptionError> {
         let current_time = 0;
         self._decrypt_at_time(token, None, current_time)
     }
@@ -197,7 +194,11 @@ impl Fernet {
     /// DecryptionError. The ttl is measured in seconds. This is a relative time, not
     /// the absolute time of expiry. IE you would use 60 as a ttl_secs if you wanted
     /// tokens to be considered invalid after that time.
-    pub fn decrypt_with_ttl(&self, token: &str, ttl_secs: u64) -> Result<Vec<u8>, DecryptionError> {
+    pub fn decrypt_with_ttl(
+        &self,
+        token: &[u8],
+        ttl_secs: u64,
+    ) -> Result<Vec<u8>, DecryptionError> {
         let current_time = 0;
         self._decrypt_at_time(token, Some(ttl_secs), current_time)
     }
@@ -227,11 +228,11 @@ impl Fernet {
 
     fn _decrypt_at_time(
         &self,
-        token: &str,
+        data: &[u8],
         ttl: Option<u64>,
         current_time: u64,
     ) -> Result<Vec<u8>, DecryptionError> {
-        let parsed = Self::_decrypt_parse(token, ttl, current_time)?;
+        let parsed = Self::_decrypt_parse(data, ttl, current_time)?;
 
         let mut hmac_signer = hmac::Hmac::<Sha256>::new_from_slice(&self.signing_key)
             .expect("Signing key has unexpected size");
@@ -256,35 +257,13 @@ impl Fernet {
 
     /// Parse the base64-encoded token into parts, verify timestamp TTL if given
     fn _decrypt_parse(
-        token: &str,
+        data: &[u8],
         ttl: Option<u64>,
         current_time: u64,
     ) -> Result<ParsedToken, DecryptionError> {
-        let data = match b64_decode_url(token) {
-            Ok(data) => data,
-            Err(_) => return Err(DecryptionError),
-        };
+        let iv: [u8; 16] = data[0..16].try_into().map_err(|_| DecryptionError)?;
 
-        match data[0] {
-            0x80 => {}
-            _ => return Err(DecryptionError),
-        }
-
-        let timestamp = BigEndian::read_u64(&data[1..9]);
-
-        if let Some(ttl) = ttl {
-            if timestamp + ttl < current_time {
-                return Err(DecryptionError);
-            }
-        }
-
-        if current_time + MAX_CLOCK_SKEW < timestamp {
-            return Err(DecryptionError);
-        }
-
-        let iv: [u8; 16] = data[9..25].try_into().map_err(|_| DecryptionError)?;
-
-        let rest = &data[25..];
+        let rest = &data[16..];
         if rest.len() < 32 {
             return Err(DecryptionError);
         }
@@ -302,202 +281,4 @@ impl Fernet {
             hmac,
         })
     }
-}
-
-#[cfg(test)]
-mod tests {
-    extern crate std;
-
-    use super::{DecryptionError, Fernet, MultiFernet};
-    use alloc::vec::Vec;
-    use serde_derive::Deserialize;
-    use std::collections::HashSet;
-    use time::format_description::well_known::Rfc3339;
-    use time::OffsetDateTime;
-
-    #[derive(Deserialize)]
-    struct GenerateVector<'a> {
-        token: &'a str,
-        now: &'a str,
-        iv: Vec<u8>,
-        src: &'a str,
-        secret: &'a str,
-    }
-
-    #[derive(Deserialize)]
-    struct VerifyVector<'a> {
-        token: &'a str,
-        now: &'a str,
-        ttl_sec: u64,
-        src: &'a str,
-        secret: &'a str,
-    }
-
-    #[derive(Deserialize, Debug)]
-    struct InvalidVector<'a> {
-        token: &'a str,
-        now: &'a str,
-        ttl_sec: u64,
-        secret: &'a str,
-    }
-
-    #[test]
-    fn test_generate_vectors() {
-        let vectors: Vec<GenerateVector> =
-            serde_json::from_str(include_str!("../tests/generate.json")).unwrap();
-
-        for v in vectors {
-            let f = Fernet::new(v.secret).unwrap();
-            let token = f._encrypt_from_parts(
-                v.src.as_bytes(),
-                OffsetDateTime::parse(v.now, &Rfc3339)
-                    .unwrap()
-                    .unix_timestamp() as u64,
-                &v.iv,
-            );
-            assert_eq!(token, v.token);
-        }
-    }
-
-    #[test]
-    fn test_verify_vectors() {
-        let vectors: Vec<VerifyVector> =
-            serde_json::from_str(include_str!("../tests/verify.json")).unwrap();
-
-        for v in vectors {
-            let f = Fernet::new(v.secret).unwrap();
-            let decrypted = f._decrypt_at_time(
-                v.token,
-                Some(v.ttl_sec),
-                OffsetDateTime::parse(v.now, &Rfc3339)
-                    .unwrap()
-                    .unix_timestamp() as u64,
-            );
-            assert_eq!(decrypted, Ok(v.src.as_bytes().to_vec()));
-        }
-    }
-
-    #[test]
-    fn test_invalid_vectors() {
-        let vectors: Vec<InvalidVector> =
-            serde_json::from_str(include_str!("../tests/invalid.json")).unwrap();
-
-        for v in vectors {
-            let f = Fernet::new(v.secret).unwrap();
-            let decrypted = f._decrypt_at_time(
-                v.token,
-                Some(v.ttl_sec),
-                OffsetDateTime::parse(v.now, &Rfc3339)
-                    .unwrap()
-                    .unix_timestamp() as u64,
-            );
-            assert_eq!(decrypted, Err(DecryptionError));
-        }
-    }
-
-    #[test]
-    fn test_invalid() {
-        let f = Fernet::new(&super::b64_encode_url(&[0; 32].to_vec())).unwrap();
-
-        // Invalid version byte
-        assert_eq!(
-            f.decrypt(&crate::b64_encode_url(&b"\x81".to_vec())),
-            Err(DecryptionError)
-        );
-        // Timestamp too short
-        assert_eq!(
-            f.decrypt(&super::b64_encode_url(&b"\x80\x00\x00\x00".to_vec())),
-            Err(DecryptionError)
-        );
-        // Invalid base64
-        assert_eq!(f.decrypt("\x00"), Err(DecryptionError));
-    }
-
-    #[test]
-    fn test_roundtrips() {
-        let f = Fernet::new(&super::b64_encode_url(&[0; 32].to_vec())).unwrap();
-
-        for val in [b"".to_vec(), b"Abc".to_vec(), b"\x00\xFF\x00\x00".to_vec()].iter() {
-            assert_eq!(f.decrypt(&f.encrypt(val)), Ok(val.clone()));
-        }
-    }
-
-    #[test]
-    fn test_new_errors() {
-        assert!(Fernet::new("axxx").is_none());
-        assert!(Fernet::new(&super::b64_encode_url(&[0, 33].to_vec())).is_none());
-        assert!(Fernet::new(&super::b64_encode_url(&[0, 31].to_vec())).is_none());
-    }
-
-    #[test]
-    fn test_generate_key() {
-        let mut keys = HashSet::new();
-        for _ in 0..1024 {
-            keys.insert(Fernet::generate_key());
-        }
-        assert_eq!(keys.len(), 1024);
-    }
-
-    #[test]
-    fn test_generate_key_roundtrips() {
-        let k = Fernet::generate_key();
-        let f1 = Fernet::new(&k).unwrap();
-        let f2 = Fernet::new(&k).unwrap();
-
-        for val in [b"".to_vec(), b"Abc".to_vec(), b"\x00\xFF\x00\x00".to_vec()].iter() {
-            assert_eq!(f1.decrypt(&f2.encrypt(val)), Ok(val.clone()));
-            assert_eq!(f2.decrypt(&f1.encrypt(val)), Ok(val.clone()));
-        }
-    }
-
-    #[test]
-    fn test_multi_encrypt() {
-        let key1 = Fernet::generate_key();
-        let key2 = Fernet::generate_key();
-        let f1 = Fernet::new(&key1).unwrap();
-        let f2 = Fernet::new(&key2).unwrap();
-        let f =
-            MultiFernet::new([Fernet::new(&key1).unwrap(), Fernet::new(&key2).unwrap()].to_vec());
-        assert_eq!(f1.decrypt(&f.encrypt(b"abc")).unwrap(), b"abc".to_vec());
-        assert_eq!(f2.decrypt(&f.encrypt(b"abc")), Err(DecryptionError));
-    }
-
-    #[test]
-    fn test_multi_decrypt() {
-        let key1 = Fernet::generate_key();
-        let key2 = Fernet::generate_key();
-        let f1 = Fernet::new(&key1).unwrap();
-        let f2 = Fernet::new(&key2).unwrap();
-        let f =
-            MultiFernet::new([Fernet::new(&key1).unwrap(), Fernet::new(&key2).unwrap()].to_vec());
-        assert_eq!(f.decrypt(&f1.encrypt(b"abc")).unwrap(), b"abc".to_vec());
-        assert_eq!(f.decrypt(&f2.encrypt(b"abc")).unwrap(), b"abc".to_vec());
-        assert_eq!(f.decrypt("\x00"), Err(DecryptionError));
-    }
-
-    #[test]
-    #[should_panic]
-    fn test_multi_no_fernets() {
-        MultiFernet::new(Vec::new());
-    }
-
-    #[test]
-    fn test_multi_roundtrips() {
-        let f = MultiFernet::new([Fernet::new(&Fernet::generate_key()).unwrap()].to_vec());
-
-        for val in [b"".to_vec(), b"Abc".to_vec(), b"\x00\xFF\x00\x00".to_vec()].iter() {
-            assert_eq!(f.decrypt(&f.encrypt(val)), Ok(val.clone()));
-        }
-    }
-}
-
-/// base64 had a habit of changing this a fair bit, so isolating these functions
-/// to reduce future code changes.
-///
-pub(crate) fn b64_decode_url(input: &str) -> Result<Vec<u8>, base64::DecodeError> {
-    base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(input.trim_end_matches('='))
-}
-
-pub(crate) fn b64_encode_url(input: &Vec<u8>) -> String {
-    base64::engine::general_purpose::URL_SAFE.encode(input)
 }

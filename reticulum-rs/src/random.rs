@@ -1,4 +1,10 @@
-use defmt::trace;
+#[allow(unused_imports)]
+#[cfg(feature = "embassy")]
+use defmt::{debug, error, info, trace, warn};
+#[allow(unused_imports)]
+#[cfg(feature = "tokio")]
+use log::{debug, error, info, trace, warn};
+
 use rand::{RngCore, SeedableRng};
 use rand_chacha::ChaCha20Rng;
 

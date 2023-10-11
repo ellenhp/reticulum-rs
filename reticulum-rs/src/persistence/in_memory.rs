@@ -1,8 +1,14 @@
+#[allow(unused_imports)]
+#[cfg(feature = "embassy")]
+use defmt::{debug, error, info, trace, warn};
+#[allow(unused_imports)]
+#[cfg(feature = "tokio")]
+use log::{debug, error, info, trace, warn};
+
 use alloc::boxed::Box;
 use alloc::format;
 use alloc::{string::String, vec::Vec};
 use async_trait::async_trait;
-use defmt::{trace, warn};
 
 use crate::identity::Identity;
 use crate::NameHash;
@@ -131,12 +137,18 @@ impl ReticulumStore for InMemoryReticulumStore {
             .iter()
             .any(|(key, _)| key == &name)
         {
+            trace!("adding destination");
             self.destinations
                 .lock()
                 .await
                 .push((destination.full_name(), destination.clone()));
         } else {
-            trace!("destination already exists");
+            trace!("destination already exists, removing and re-adding");
+            self.remove_destination(&destination).await?;
+            self.destinations
+                .lock()
+                .await
+                .push((destination.full_name(), destination.clone()));
         }
         Ok(())
     }
@@ -246,6 +258,7 @@ impl ReticulumStore for InMemoryReticulumStore {
             return None;
         };
         for (app_name, aspects) in destination_names {
+            info!("app name: {:?}", app_name.as_str());
             let mut builder = Destination::builder(app_name.as_str());
             for aspect in aspects {
                 builder = builder.aspect(aspect.as_str());
@@ -254,6 +267,14 @@ impl ReticulumStore for InMemoryReticulumStore {
                 builder.build_single(identity, self).await.map_err(|err| {
                     PersistenceError::Unspecified(format!("error building destination: {:?}", err))
                 }) {
+                info!(
+                    "reconstructed destination hash: {:?}",
+                    hex::encode(destination.address_hash().0).as_str()
+                );
+                info!(
+                    "reconstructed name hash: {:?}",
+                    hex::encode(destination.name_hash().0).as_str()
+                );
                 destination
             } else {
                 warn!("error building destination");

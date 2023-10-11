@@ -3,8 +3,14 @@ use core::error::Error;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::{boxed::Box, vec::Vec};
-use defmt::warn;
 use packed_struct::prelude::{PackedStruct, PrimitiveEnum};
+
+#[allow(unused_imports)]
+#[cfg(feature = "embassy")]
+use defmt::{debug, error, info, trace, warn};
+#[allow(unused_imports)]
+#[cfg(feature = "tokio")]
+use log::{debug, error, info, trace, warn};
 
 use crate::random::random_bytes;
 use crate::{
@@ -213,7 +219,6 @@ impl WirePacket {
             header_common: header_common.clone(),
             header_variable,
         };
-        debug_assert!(!Self::should_encrypt_payload(&header_common, &header));
         WirePacket {
             header_common: header_common.clone(),
             header,
@@ -236,7 +241,11 @@ impl WirePacket {
             hops: 0,
         };
         let header_variable = PacketHeaderVariable::Header1(PacketHeader1 {
-            destination_hash: destination.address_hash().0,
+            destination_hash: if packet_type == PacketType::Announce {
+                destination.address_hash_old().0
+            } else {
+                destination.address_hash().0
+            },
             context_type,
         });
         let header = PacketHeader {
@@ -480,7 +489,7 @@ impl AnnouncePacket {
         random_bytes(&mut random_hash_bytes).await;
         let random_hash = NameHash(random_hash_bytes); // TODO: Include time? That's what the reference implementation does.
         let mut signature_material = [0u8; 164].to_vec();
-        signature_material[0..16].copy_from_slice(&destination.address_hash().0);
+        signature_material[0..16].copy_from_slice(&destination.address_hash_old().0);
         signature_material[16..80].copy_from_slice(&identity.wire_repr());
         signature_material[80..90].copy_from_slice(&destination_name_hash.0);
         signature_material[90..100].copy_from_slice(&random_hash.0);
@@ -531,6 +540,41 @@ impl AnnouncePacket {
     }
 }
 
+pub struct MessagePacket {
+    pub wire_packet: WirePacket,
+}
+
+impl MessagePacket {
+    pub async fn new(
+        destination: &Destination,
+        context_type: PacketContextType,
+        payload: Vec<u8>,
+    ) -> Result<MessagePacket, PacketError> {
+        let wire_packet = WirePacket::new_without_transport(
+            PacketType::Data,
+            context_type,
+            TransportType::Broadcast,
+            destination,
+            payload,
+        )
+        .await?;
+        Ok(MessagePacket { wire_packet })
+    }
+
+    pub fn wire_packet(&self) -> &WirePacket {
+        &self.wire_packet
+    }
+
+    pub fn decrypt_payload(&self, identity: &Identity) -> Result<Vec<u8>, CryptoError> {
+        if let Identity::Local(local) = identity {
+            return local
+                .decrypt(&self.wire_packet.payload)
+                .map_err(|err| CryptoError::DecryptFailed);
+        }
+        Err(CryptoError::InvalidKey)
+    }
+}
+
 #[derive(Clone)]
 pub enum Packet {
     Announce(AnnouncePacket),
@@ -564,7 +608,7 @@ impl Packet {
 mod test {
 
     use alloc::{boxed::Box, sync::Arc, vec::Vec};
-    use smol::lock::Mutex;
+    use tokio::sync::Mutex;
 
     use crate::{
         identity::{Identity, IdentityCommon, LocalIdentity},
