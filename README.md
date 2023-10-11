@@ -1,6 +1,6 @@
 # reticulum-rs
 
-WIP rewrite of Reticulum in Rust explicitly targeted at the ESP32 (no tokio, avoids memory-inefficient data structures. etc). Not ready for use. Rule of thumb with stuff like this: If you wouldn't send a POST request with your cleartext to `nsa.gov` then it probably doesn't belong in this software.
+Partial rewrite of Reticulum in Rust for `no_std` targets. Not ready for use. Work has stopped on this project in favor of the [Liminality](https://github.com/ellenhp/liminality) reference implementation, which provides trustworthy and comprehensible security properties by using the noise protocol framework, and strong (but not very comprehensible) privacy properties. This project is probably a good starting point if someone else wants to continue work in this space, but it's not polished and probably has bugs.
 
 ## Roadmap
 
